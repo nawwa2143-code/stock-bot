@@ -1,0 +1,15 @@
+name: Stock Bot
+on:
+  schedule:
+    - cron: '*/5 14-21 * * 1-5'
+  workflow_dispatch:
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      - run: pip install yfinance pandas numpy ta twilio apscheduler pytz
+      - run: timeout 280 python stock_bot_single.py || true
