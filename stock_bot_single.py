@@ -137,6 +137,17 @@ def generate_signal(ticker, df, price_info):
             sell += 10
             reasons_sell.append(f"حجم مرتفع ({last['vol_ratio']:.1f}x)")
 
+    # ── حساب وقف الخسارة والهدف بناءً على ATR (تذبذب السهم الحقيقي) ──
+    atr         = last["atr"]
+    price       = price_info["price"]
+    atr_pct     = round(atr / price * 100, 1)
+    # وقف الخسارة = 2× ATR تحت سعر الشراء (يتجنب التذبذب الطبيعي)
+    stop_loss   = round(price - (atr * 2), 2)
+    # الهدف = 3× ATR فوق سعر الشراء (نسبة ربح/خسارة 1.5:1)
+    target      = round(price + (atr * 3), 2)
+    stop_pct    = round((price - stop_loss) / price * 100, 1)
+    target_pct  = round((target - price) / price * 100, 1)
+
     # القرار النهائي
     if buy > sell:
         conf = round(buy / max_pts * 100)
@@ -146,12 +157,15 @@ def generate_signal(ticker, df, price_info):
             "ticker":     ticker,
             "action":     "شراء 🟢",
             "action_en":  "BUY",
-            "price":      price_info["price"],
+            "price":      price,
             "change_pct": price_info["change_pct"],
             "confidence": conf,
             "reasons":    reasons_buy,
-            "stop_loss":  round(price_info["price"] * 0.97, 2),
-            "target":     round(price_info["price"] * 1.05, 2),
+            "stop_loss":  stop_loss,
+            "stop_pct":   stop_pct,
+            "target":     target,
+            "target_pct": target_pct,
+            "atr_pct":    atr_pct,
         }
     if sell > buy:
         conf = round(sell / max_pts * 100)
@@ -161,12 +175,15 @@ def generate_signal(ticker, df, price_info):
             "ticker":     ticker,
             "action":     "بيع 🔴",
             "action_en":  "SELL",
-            "price":      price_info["price"],
+            "price":      price,
             "change_pct": price_info["change_pct"],
             "confidence": conf,
             "reasons":    reasons_sell,
             "stop_loss":  None,
+            "stop_pct":   None,
             "target":     None,
+            "target_pct": None,
+            "atr_pct":    atr_pct,
         }
     return None
 
@@ -190,7 +207,8 @@ def send_signal(signal):
         f"🏷️ السهم: *{signal['ticker']}*",
         f"📌 التوصية: *{signal['action']}*",
         f"💵 السعر: *${signal['price']}*",
-        f"📈 التغيير: {signal['change_pct']:+.2f}%",
+        f"📈 التغيير اليوم: {signal['change_pct']:+.2f}%",
+        f"📊 تذبذب السهم اليومي: {signal['atr_pct']}%",
         f"🎯 الثقة: *{signal['confidence']}%*",
         "",
         "📋 *الأسباب:*",
@@ -198,7 +216,13 @@ def send_signal(signal):
     for r in signal["reasons"]:
         lines.append(f"  • {r}")
     if signal.get("stop_loss"):
-        lines += ["", f"🛑 وقف الخسارة: ${signal['stop_loss']}", f"🎯 الهدف: ${signal['target']}"]
+        lines += [
+            "",
+            f"🛑 وقف الخسارة: *${signal['stop_loss']}* ({signal['stop_pct']}% تحت السعر)",
+            f"🎯 الهدف: *${signal['target']}* ({signal['target_pct']}% فوق السعر)",
+            "",
+            f"💡 وقف الخسارة محسوب بناءً على تذبذب السهم الحقيقي",
+        ]
     lines += ["", "⚠️ هذه ليست نصيحة مالية."]
     return send_whatsapp("\n".join(lines))
 
