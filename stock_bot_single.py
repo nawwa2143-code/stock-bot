@@ -77,58 +77,35 @@ SPECULATIVE_BASE = [
 ]
 
 def get_smart_investment_list():
-    logger.info("🔍 اختيار افضل اسهم الاستثمار...")
-    candidates = []
-    for ticker in SP500_ALL:
-        try:
-            stock  = yf.Ticker(ticker)
-            info   = stock.fast_info
-            price  = info.last_price
-            volume = info.three_month_average_volume
-            if volume < 1_000_000 or price < 10:
-                continue
-            hist = stock.history(period="3mo", interval="1d")
-            if hist.empty or len(hist) < 20:
-                continue
-            ma50     = hist["Close"].rolling(min(50, len(hist))).mean().iloc[-1]
-            momentum = round((price - hist["Close"].iloc[-6]) / hist["Close"].iloc[-6] * 100, 2) if len(hist) >= 6 else 0
-            vol_ratio = hist["Volume"].iloc[-1] / hist["Volume"].rolling(20).mean().iloc[-1]
-            if price < ma50 * 0.95:
-                continue
-            candidates.append({"ticker": ticker, "momentum": momentum, "vol_ratio": round(vol_ratio, 2)})
-        except:
-            pass
-    candidates.sort(key=lambda x: (x["momentum"], x["vol_ratio"]), reverse=True)
-    selected = [c["ticker"] for c in candidates[:30]]
-    logger.info(f"تم اختيار {len(selected)} سهم للاستثمار")
-    return selected if selected else SP500_ALL[:30]
+    logger.info("🔍 جلب افضل اسهم الاستثمار من Yahoo Finance...")
+    try:
+        url = "https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved?scrIds=day_gainers&count=50&region=US"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        r = requests.get(url, headers=headers, timeout=10)
+        quotes = r.json()["finance"]["result"][0]["quotes"]
+        tickers = [q["symbol"] for q in quotes
+                   if q.get("regularMarketPrice", 0) > 10
+                   and q.get("averageDailyVolume3Month", 0) > 1_000_000]
+        logger.info(f"تم جلب {len(tickers)} سهم استثمار")
+        return tickers[:30]
+    except Exception as e:
+        logger.error(f"خطأ في جلب اسهم الاستثمار: {e}")
+        return []
 
 def get_smart_speculative_list():
-    logger.info("🔍 اختيار افضل اسهم المضاربة...")
-    candidates = []
-    for ticker in SPECULATIVE_BASE:
-        try:
-            stock  = yf.Ticker(ticker)
-            info   = stock.fast_info
-            price  = info.last_price
-            volume = info.three_month_average_volume
-            if not (1 <= price <= 20) or volume < 5_000_000:
-                continue
-            hist = stock.history(period="1mo", interval="1d")
-            if hist.empty or len(hist) < 10:
-                continue
-            daily_range = ((hist["High"] - hist["Low"]) / hist["Low"] * 100).mean()
-            if daily_range < 2:
-                continue
-            vol_ratio = hist["Volume"].iloc[-1] / hist["Volume"].rolling(20).mean().iloc[-1]
-            momentum  = round((price - hist["Close"].iloc[-4]) / hist["Close"].iloc[-4] * 100, 2) if len(hist) >= 4 else 0
-            candidates.append({"ticker": ticker, "vol_ratio": round(vol_ratio, 2), "daily_range": round(daily_range, 2), "momentum": momentum})
-        except:
-            pass
-    candidates.sort(key=lambda x: (x["vol_ratio"], x["daily_range"]), reverse=True)
-    selected = [c["ticker"] for c in candidates[:20]]
-    logger.info(f"تم اختيار {len(selected)} سهم للمضاربة")
-    return selected if selected else SPECULATIVE_BASE[:20]
+    logger.info("🔍 جلب افضل اسهم المضاربة من Yahoo Finance...")
+    try:
+        url = "https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved?scrIds=most_actives&count=100&region=US"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        r = requests.get(url, headers=headers, timeout=10)
+        quotes = r.json()["finance"]["result"][0]["quotes"]
+        tickers = [q["symbol"] for q in quotes
+                   if 1 <= q.get("regularMarketPrice", 0) <= 20]
+        logger.info(f"تم جلب {len(tickers)} سهم مضاربة")
+        return tickers[:20]
+    except Exception as e:
+        logger.error(f"خطأ في جلب اسهم المضاربة: {e}")
+        return []
 
 TODAY_INVESTMENT  = []
 TODAY_SPECULATIVE = []
@@ -859,3 +836,4 @@ if __name__ == "__main__":
         scheduler.start()
     except KeyboardInterrupt:
         logger.info("👋 تم الإيقاف")
+
