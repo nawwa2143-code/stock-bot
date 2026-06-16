@@ -33,6 +33,8 @@ import pytz
 import requests
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import threading
 
 # ══════════════════════════════════════════════
 # قوائم الأسهم الاحتياطية
@@ -863,10 +865,33 @@ def check_telegram_updates():
         logger.error(f"خطأ في getUpdates: {e}")
 
 # ══════════════════════════════════════════════
+# خادم HTTP صغير - فقط لإرضاء Render (يحتاج بورت مفتوح)
+# ══════════════════════════════════════════════
+class PingHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b'Bot is running!')
+
+    def log_message(self, format, *args):
+        pass
+
+def run_ping_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(('0.0.0.0', port), PingHandler)
+    logger.info(f"🌐 خادم Ping يعمل على port {port}")
+    server.serve_forever()
+
+# ══════════════════════════════════════════════
 # التشغيل
 # ══════════════════════════════════════════════
 if __name__ == "__main__":
     logger.info("🚀 يعمل بوت الأسهم الذكي - تلغرام!")
+
+    # تشغيل خادم Ping في خلفية (مطلوب من Render)
+    server_thread = threading.Thread(target=run_ping_server, daemon=True)
+    server_thread.start()
+
 
     # إرسال رسالة ترحيب
     send_telegram(
