@@ -882,6 +882,14 @@ def run_ping_server():
     logger.info(f"🌐 خادم Ping يعمل على port {port}")
     server.serve_forever()
 
+def self_ping():
+    try:
+        url = os.environ.get("RENDER_URL", "https://stock-bot-ilzq.onrender.com")
+        requests.get(url, timeout=10)
+        logger.info("🏓 Self-ping ✅")
+    except Exception as e:
+        logger.warning(f"🏓 Self-ping فشل: {e}")
+
 # ══════════════════════════════════════════════
 # التشغيل
 # ══════════════════════════════════════════════
@@ -922,6 +930,9 @@ if __name__ == "__main__":
 
     # ملخص أسبوعي (الجمعة بعد إغلاق السوق)
     scheduler.add_job(weekly_summary, CronTrigger(hour=16, minute=30, day_of_week="fri"))
+
+    # self-ping كل 10 دقايق عشان ما ينام على Render
+    scheduler.add_job(self_ping, "interval", minutes=10)
 
     try:
         scheduler.start()
