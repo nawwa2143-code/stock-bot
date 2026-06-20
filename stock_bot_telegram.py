@@ -121,36 +121,36 @@ def send_telegram(message, chat_id=None):
 # ══════════════════════════════════════════════
 def get_smart_investment_list():
     logger.info("🔍 جلب أسهم الاستثمار...")
-    headers = {"User-Agent": "Mozilla/5.0"}
     tickers = []
     for scr_id in ["day_gainers", "most_actives", "growth_technology_stocks"]:
         try:
-            url = f"https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved?scrIds={scr_id}&count=30"
-            r = requests.get(url, headers=headers, timeout=10)
-            quotes = r.json()["finance"]["result"][0]["quotes"]
+            result = yf.screen(scr_id, count=30)
+            quotes = result.get("quotes", [])
             found = [q["symbol"] for q in quotes
                      if q.get("regularMarketPrice", 0) > 10
                      and q.get("averageDailyVolume3Month", 0) > 1_000_000]
             tickers.extend(found)
-        except:
-            pass
+        except Exception as e:
+            logger.warning(f"⚠️ فشل سكرينر الاستثمار ({scr_id}): {e}")
+    if not tickers:
+        logger.warning("⚠️ كل سكرينرات الاستثمار فشلت — استخدام القائمة الاحتياطية")
     tickers = list(dict.fromkeys(tickers))
     return tickers[:30] if tickers else SP500_BACKUP[:30]
 
 def get_smart_speculative_list():
     logger.info("🔍 جلب أسهم المضاربة...")
-    headers = {"User-Agent": "Mozilla/5.0"}
     tickers = []
     for scr_id in ["most_actives", "day_gainers"]:
         try:
-            url = f"https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved?scrIds={scr_id}&count=50"
-            r = requests.get(url, headers=headers, timeout=10)
-            quotes = r.json()["finance"]["result"][0]["quotes"]
+            result = yf.screen(scr_id, count=50)
+            quotes = result.get("quotes", [])
             found = [q["symbol"] for q in quotes
                      if 1 <= q.get("regularMarketPrice", 0) <= 20]
             tickers.extend(found)
-        except:
-            pass
+        except Exception as e:
+            logger.warning(f"⚠️ فشل سكرينر المضاربة ({scr_id}): {e}")
+    if not tickers:
+        logger.warning("⚠️ كل سكرينرات المضاربة فشلت — استخدام القائمة الاحتياطية")
     tickers = list(dict.fromkeys(tickers))
     return tickers[:20] if tickers else SPECULATIVE_BACKUP[:20]
 
