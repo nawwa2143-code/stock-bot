@@ -1,30 +1,30 @@
 #!/usr/bin/env python3
 """
-بوت الأسهم الذكي - تلغرام
-- 8 مؤشرات فنية (RSI, MACD, BB, EMA, VWAP, ADX, OBV, حجم)
-- إدارة رأس المال
-- تتبع المحفظة
-- ملخص أسبوعي
-- المدة والربح المتوقع
+بوت الأسهم الذكي - تلغرام (نسخة مصححة)
 """
 
-import os, json, logging
+import os, json, logging, time
 from datetime import datetime, timedelta
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
 # ══════════════════════════════════════════════
-# الإعدادات - من متغيرات البيئة
+# الإعدادات
 # ══════════════════════════════════════════════
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
+TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
-MIN_CONFIDENCE = 60
-CHECK_INTERVAL_MINUTES = 5
+RENDER_URL       = os.environ.get("RENDER_URL", "https://stock-bot-ilzq.onrender.com")
+MIN_CONFIDENCE   = 60
 
-# ══════════════════════════════════════════════
-# المكتبات
-# ══════════════════════════════════════════════
+# العطل الرسمية الأمريكية 2025-2026
+US_HOLIDAYS = {
+    "2025-01-01","2025-01-20","2025-02-17","2025-04-18","2025-05-26",
+    "2025-06-19","2025-07-04","2025-09-01","2025-11-27","2025-12-25",
+    "2026-01-01","2026-01-19","2026-02-16","2026-04-03","2026-05-25",
+    "2026-06-19","2026-07-03","2026-09-07","2026-11-26","2026-12-25",
+}
+
 import yfinance as yf
 import pandas as pd
 import numpy as np
@@ -53,7 +53,7 @@ SPECULATIVE_BACKUP = [
     "COIN","BBAI","APLD","CTIC","VXRT","OCGN"
 ]
 
-TODAY_INVESTMENT = []
+TODAY_INVESTMENT  = []
 TODAY_SPECULATIVE = []
 
 # ══════════════════════════════════════════════
@@ -63,17 +63,22 @@ DATA_FILE = "bot_data.json"
 
 def load_data():
     if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+        try:
+            with open(DATA_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except:
+            pass
     return {
         "portfolio":      {},
         "signals":        {},
         "signal_counter": 0,
         "history":        [],
-        "waiting_input":  None,
         "capital":        10000,
         "risk_pct":       1.0,
         "weekly_signals": [],
+        "sent_today":     {},
+        "portfolio_alerts": {},
+        "last_update_id": 0,
     }
 
 def save_data(data):
@@ -81,10 +86,24 @@ def save_data(data):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 # ══════════════════════════════════════════════
+# التحقق من الإعدادات
+# ══════════════════════════════════════════════
+def validate_config():
+    if not TELEGRAM_TOKEN:
+        logger.error("❌ TELEGRAM_TOKEN غير موجود!")
+        return False
+    if not TELEGRAM_CHAT_ID:
+        logger.error("❌ TELEGRAM_CHAT_ID غير موجود!")
+        return False
+    return True
+
+# ══════════════════════════════════════════════
 # إرسال تلغرام
 # ══════════════════════════════════════════════
 def send_telegram(message, chat_id=None):
     cid = chat_id or TELEGRAM_CHAT_ID
+    if not cid or not TELEGRAM_TOKEN:
+        return
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         r = requests.post(url, json={
@@ -92,10 +111,8 @@ def send_telegram(message, chat_id=None):
             "text": message,
             "parse_mode": "Markdown"
         }, timeout=10)
-        if r.status_code == 200:
-            logger.info("✅ رسالة أُرسلت")
-        else:
-            logger.error(f"❌ خطأ: {r.text}")
+        if r.status_code != 200:
+            logger.error(f"❌ خطأ إرسال: {r.text}")
     except Exception as e:
         logger.error(f"❌ فشل الإرسال: {e}")
 
@@ -138,17 +155,18 @@ def get_smart_speculative_list():
     return tickers[:20] if tickers else SPECULATIVE_BACKUP[:20]
 
 # ══════════════════════════════════════════════
-# التحليل الفني - 8 مؤشرات
+# التحليل الفني
 # ══════════════════════════════════════════════
 def fetch_and_analyze(ticker):
     try:
         stock = yf.Ticker(ticker)
+        # بيانات يومية للمؤشرات الأساسية
         df = stock.history(period="3mo", interval="1d")
         if df.empty or len(df) < 30:
             return None, None, None, None
 
         info = stock.fast_info
-        price = round(info.last_price, 2)
+        price      = round(info.last_price, 2)
         prev_close = info.previous_close
         change_pct = round((price - prev_close) / prev_close * 100, 2)
 
@@ -157,28 +175,23 @@ def fetch_and_analyze(ticker):
         l = df["Low"]
         v = df["Volume"]
 
-        # المؤشرات الأصلية
-        df["rsi"] = ta.momentum.RSIIndicator(c, window=14).rsi()
-        macd_obj = ta.trend.MACD(c)
-        df["macd"] = macd_obj.macd()
-        df["macd_signal"] = macd_obj.macd_signal()
-        bb = ta.volatility.BollingerBands(c)
-        df["bb_pct"] = bb.bollinger_pband()
-        df["ema9"] = ta.trend.EMAIndicator(c, window=9).ema_indicator()
-        df["ema21"] = ta.trend.EMAIndicator(c, window=21).ema_indicator()
-        df["atr"] = ta.volatility.AverageTrueRange(h, l, c).average_true_range()
-        df["vol_ratio"] = v / v.rolling(20).mean()
+        # المؤشرات
+        df["rsi"]        = ta.momentum.RSIIndicator(c, window=14).rsi()
+        macd_obj         = ta.trend.MACD(c)
+        df["macd"]       = macd_obj.macd()
+        df["macd_signal"]= macd_obj.macd_signal()
+        bb               = ta.volatility.BollingerBands(c)
+        df["bb_pct"]     = bb.bollinger_pband()
+        df["ema9"]       = ta.trend.EMAIndicator(c, window=9).ema_indicator()
+        df["ema21"]      = ta.trend.EMAIndicator(c, window=21).ema_indicator()
+        df["atr"]        = ta.volatility.AverageTrueRange(h, l, c).average_true_range()
+        df["vol_ratio"]  = v / v.rolling(20).mean()
+        df["adx"]        = ta.trend.ADXIndicator(h, l, c, window=14).adx()
+        df["obv"]        = ta.volume.OnBalanceVolumeIndicator(c, v).on_balance_volume()
+        df["obv_ema"]    = df["obv"].ewm(span=20).mean()
 
-        # المؤشرات الجديدة
-        # VWAP (يومي تقريبي)
-        df["vwap"] = (c * v).cumsum() / v.cumsum()
-
-        # ADX
-        df["adx"] = ta.trend.ADXIndicator(h, l, c, window=14).adx()
-
-        # OBV
-        df["obv"] = ta.volume.OnBalanceVolumeIndicator(c, v).on_balance_volume()
-        df["obv_ema"] = df["obv"].ewm(span=20).mean()
+        # ملاحظة: هذا "متوسط السعر النموذجي" وليس VWAP الحقيقي (لأن البيانات يومية وليست بالدقيقة)
+        df["typical_price"] = (h + l + c) / 3
 
         df = df.dropna()
         if len(df) < 2:
@@ -194,17 +207,20 @@ def fetch_and_analyze(ticker):
 
 
 def generate_signal(ticker, last, prev, price_info, mode="investment"):
-    buy, sell, max_pts = 0, 0, 140
+    buy, sell = 0, 0
     reasons_buy, reasons_sell = [], []
 
-    rsi = last["rsi"]
-    oversold  = 35 if mode == "investment" else 40
+    rsi        = last["rsi"]
+    oversold   = 35 if mode == "investment" else 40
     overbought = 65 if mode == "investment" else 60
-    price = price_info["price"]
+    price      = price_info["price"]
+
+    # النقاط الممكنة الحقيقية بدون ADX = 100 نقطة
+    max_pts = 100
 
     # ١. RSI (25 نقطة)
     if rsi < oversold:
-        buy += 25
+        buy  += 25
         reasons_buy.append(f"RSI={rsi:.0f} (مبالغ في بيعه)")
     elif rsi > overbought:
         sell += 25
@@ -212,7 +228,7 @@ def generate_signal(ticker, last, prev, price_info, mode="investment"):
 
     # ٢. MACD (25 نقطة)
     if prev["macd"] < prev["macd_signal"] and last["macd"] > last["macd_signal"]:
-        buy += 25
+        buy  += 25
         reasons_buy.append("تقاطع MACD صعودي ✅")
     elif prev["macd"] > prev["macd_signal"] and last["macd"] < last["macd_signal"]:
         sell += 25
@@ -220,7 +236,7 @@ def generate_signal(ticker, last, prev, price_info, mode="investment"):
 
     # ٣. Bollinger (20 نقطة)
     if last["bb_pct"] < 0.05:
-        buy += 20
+        buy  += 20
         reasons_buy.append("السعر لمس الحزام السفلي")
     elif last["bb_pct"] > 0.95:
         sell += 20
@@ -228,53 +244,38 @@ def generate_signal(ticker, last, prev, price_info, mode="investment"):
 
     # ٤. EMA (20 نقطة)
     if prev["ema9"] < prev["ema21"] and last["ema9"] > last["ema21"]:
-        buy += 20
+        buy  += 20
         reasons_buy.append("EMA9 تجاوزت EMA21 للأعلى")
     elif prev["ema9"] > prev["ema21"] and last["ema9"] < last["ema21"]:
         sell += 20
         reasons_sell.append("EMA9 تجاوزت EMA21 للأسفل")
 
-    # ٥. VWAP (15 نقطة) - جديد
-    if price > last["vwap"] * 1.005:
-        buy += 15
-        reasons_buy.append(f"السعر فوق VWAP ({last['vwap']:.2f})")
-    elif price < last["vwap"] * 0.995:
-        sell += 15
-        reasons_sell.append(f"السعر تحت VWAP ({last['vwap']:.2f})")
-
-    # ٦. ADX (15 نقطة) - جديد - فلتر قوة الاتجاه
-    adx_strong = last["adx"] > 25
-    if not adx_strong:
-        # اتجاه ضعيف - نقلل الثقة
-        buy = int(buy * 0.7)
-        sell = int(sell * 0.7)
-    else:
-        if buy > sell:
-            buy += 15
-            reasons_buy.append(f"ADX={last['adx']:.0f} اتجاه قوي")
-        elif sell > buy:
-            sell += 15
-            reasons_sell.append(f"ADX={last['adx']:.0f} اتجاه قوي")
-
-    # ٧. OBV (10 نقطة) - جديد
+    # ٥. OBV (10 نقطة)
     if last["obv"] > last["obv_ema"] and prev["obv"] <= prev["obv_ema"]:
-        buy += 10
+        buy  += 10
         reasons_buy.append("OBV: أموال تدخل السهم")
     elif last["obv"] < last["obv_ema"] and prev["obv"] >= prev["obv_ema"]:
         sell += 10
         reasons_sell.append("OBV: أموال تخرج من السهم")
 
-    # ٨. حجم التداول (10 نقطة)
+    # ٦. ADX - فلتر قوة الاتجاه فقط (لا يضيف نقاط، يخصم إذا ضعيف)
+    adx_strong = last["adx"] > 25
+    if not adx_strong:
+        buy  = int(buy  * 0.7)
+        sell = int(sell * 0.7)
+    else:
+        reasons_buy.append(f"ADX={last['adx']:.0f} اتجاه قوي") if buy > sell else None
+        reasons_sell.append(f"ADX={last['adx']:.0f} اتجاه قوي") if sell > buy else None
+
+    # ٧. حجم التداول (بونص فقط)
     if last["vol_ratio"] > 1.5:
         if buy > sell:
-            buy += 10
             reasons_buy.append(f"حجم مرتفع ({last['vol_ratio']:.1f}x)")
         elif sell > buy:
-            sell += 10
             reasons_sell.append(f"حجم مرتفع ({last['vol_ratio']:.1f}x)")
 
     # حساب وقف الخسارة والهدف
-    atr = last["atr"]
+    atr     = last["atr"]
     atr_pct = round(atr / price * 100, 1)
 
     if mode == "investment":
@@ -287,10 +288,10 @@ def generate_signal(ticker, last, prev, price_info, mode="investment"):
         days_est  = max(1, round(abs(target - price) / atr))
 
     stop_pct   = round((price - stop_loss) / price * 100, 1)
-    target_pct = round((target - price) / price * 100, 1)
+    target_pct = round((target - price)    / price * 100, 1)
 
     if buy > sell:
-        conf = round(buy / max_pts * 100)
+        conf = min(round(buy / max_pts * 100), 99)
         if conf < MIN_CONFIDENCE:
             return None
         return {
@@ -303,16 +304,19 @@ def generate_signal(ticker, last, prev, price_info, mode="investment"):
         }
 
     if sell > buy:
-        conf = round(sell / max_pts * 100)
+        conf = min(round(sell / max_pts * 100), 99)
         if conf < MIN_CONFIDENCE:
             return None
+        # توصية البيع أيضاً لها وقف خسارة وهدف
+        stop_loss_sell = round(price + (atr * 2), 2)
+        target_sell    = round(price - (atr * 3), 2)
         return {
             "ticker": ticker, "action": "🔴 بيع", "action_en": "SELL",
             "mode": mode, "price": price, "change_pct": price_info["change_pct"],
             "confidence": conf, "reasons": reasons_sell,
-            "stop_loss": None, "stop_pct": None,
-            "target": None, "target_pct": None,
-            "atr_pct": atr_pct, "days_est": None,
+            "stop_loss": stop_loss_sell, "stop_pct": round((stop_loss_sell - price) / price * 100, 1),
+            "target": target_sell, "target_pct": round((price - target_sell) / price * 100, 1),
+            "atr_pct": atr_pct, "days_est": days_est,
         }
 
     return None
@@ -320,30 +324,29 @@ def generate_signal(ticker, last, prev, price_info, mode="investment"):
 # ══════════════════════════════════════════════
 # إدارة رأس المال
 # ══════════════════════════════════════════════
-def calc_position_size(price, stop_loss, capital, risk_pct):
-    """يحسب كم سهم تشتري"""
-    if not stop_loss or price <= stop_loss:
+def calc_position_size(price, stop_loss, capital, risk_pct, action_en="BUY"):
+    if not stop_loss:
         return 0
-    risk_amount = capital * (risk_pct / 100)
-    loss_per_share = price - stop_loss
+    risk_amount    = capital * (risk_pct / 100)
+    loss_per_share = abs(price - stop_loss)
+    if loss_per_share == 0:
+        return 0
     shares = int(risk_amount / loss_per_share)
     return max(1, shares)
 
 def calc_expected_profit(price, target, shares):
     if not target or not shares:
         return 0
-    return round((target - price) * shares, 2)
+    return round(abs(target - price) * shares, 2)
 
 # ══════════════════════════════════════════════
 # تنسيق رسالة التوصية
 # ══════════════════════════════════════════════
 def format_signal_message(signal, number, capital, risk_pct):
-    mode_icon = "🔵 استثمار" if signal["mode"] == "investment" else "🟡 مضاربة ⚡"
-
-    # حساب حجم الصفقة
-    shares = calc_position_size(signal["price"], signal["stop_loss"], capital, risk_pct)
+    mode_icon       = "🔵 استثمار" if signal["mode"] == "investment" else "🟡 مضاربة ⚡"
+    shares          = calc_position_size(signal["price"], signal["stop_loss"], capital, risk_pct, signal["action_en"])
     expected_profit = calc_expected_profit(signal["price"], signal["target"], shares)
-    total_investment = round(signal["price"] * shares, 2)
+    total_invest    = round(signal["price"] * shares, 2)
 
     lines = [
         "━━━━━━━━━━━━━━━━━━━",
@@ -355,7 +358,6 @@ def format_signal_message(signal, number, capital, risk_pct):
         "",
         "📋 *الأسباب:*",
     ]
-
     for r in signal["reasons"]:
         lines.append(f"  • {r}")
 
@@ -363,20 +365,20 @@ def format_signal_message(signal, number, capital, risk_pct):
         lines += [
             "",
             f"🔴 *وقف الخسارة:* ${signal['stop_loss']} ({signal['stop_pct']}%)",
-            f"🎯 *الهدف:* ${signal['target']} (+{signal['target_pct']}%)",
+            f"🎯 *الهدف:* ${signal['target']} ({signal['target_pct']}%)",
         ]
-
     if signal.get("days_est"):
         lines.append(f"⏱ *المدة المتوقعة:* {signal['days_est']} أيام")
 
-    if shares > 0 and expected_profit > 0:
+    if shares > 0:
         lines += [
             "",
             f"💼 *بناءً على محفظتك (${capital:,}):*",
             f"  📦 الكمية المقترحة: {shares} سهم",
-            f"  💵 إجمالي الاستثمار: ${total_investment:,}",
-            f"  💰 الربح المتوقع: +${expected_profit}",
+            f"  💵 إجمالي الاستثمار: ${total_invest:,}",
         ]
+        if expected_profit > 0:
+            lines.append(f"  💰 الربح المتوقع: +${expected_profit}")
 
     if signal["mode"] == "speculative":
         lines.append("⚠️ مضاربة — خطر مرتفع")
@@ -387,11 +389,12 @@ def format_signal_message(signal, number, capital, risk_pct):
 # ══════════════════════════════════════════════
 # السوق
 # ══════════════════════════════════════════════
-sent_today = {}
-
 def is_market_open():
-    now = datetime.now(pytz.timezone("America/New_York"))
+    now     = datetime.now(pytz.timezone("America/New_York"))
+    today   = now.strftime("%Y-%m-%d")
     if now.weekday() >= 5:
+        return False
+    if today in US_HOLIDAYS:
         return False
     open_t  = now.replace(hour=9,  minute=30, second=0, microsecond=0)
     close_t = now.replace(hour=16, minute=0,  second=0, microsecond=0)
@@ -408,6 +411,13 @@ def analyze_all():
         return
 
     data = load_data()
+    today = datetime.now().strftime("%Y-%m-%d")
+    sent_today = data.get("sent_today", {})
+
+    # إذا يوم جديد نصفر sent_today
+    if sent_today.get("_date") != today:
+        sent_today = {"_date": today}
+
     logger.info("🔍 تحليل الأسهم...")
 
     if not TODAY_INVESTMENT:
@@ -415,9 +425,12 @@ def analyze_all():
     if not TODAY_SPECULATIVE:
         TODAY_SPECULATIVE = get_smart_speculative_list()
 
-    investment_signals = []
+    investment_signals  = []
+    speculative_signals = []
+
     for ticker in TODAY_INVESTMENT[:30]:
         try:
+            time.sleep(0.5)  # تجنب Rate Limit
             last, prev, price_info, df = fetch_and_analyze(ticker)
             if last is None or price_info["price"] < 20:
                 continue
@@ -427,9 +440,9 @@ def analyze_all():
         except:
             pass
 
-    speculative_signals = []
     for ticker in TODAY_SPECULATIVE[:20]:
         try:
+            time.sleep(0.5)
             last, prev, price_info, df = fetch_and_analyze(ticker)
             if last is None or not (1 <= price_info["price"] <= 20):
                 continue
@@ -450,13 +463,13 @@ def analyze_all():
             "number":    num,
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
             "bought":    False,
-            "result":    None,
         }
         data["weekly_signals"].append(str(num))
         msg = format_signal_message(signal, num, data["capital"], data["risk_pct"])
         send_telegram(msg)
         sent_today[signal["ticker"]] = signal["action_en"]
 
+    data["sent_today"] = sent_today
     save_data(data)
 
 # ══════════════════════════════════════════════
@@ -469,6 +482,9 @@ def check_portfolio():
     if not data["portfolio"]:
         return
 
+    alerts = data.get("portfolio_alerts", {})
+    now    = datetime.now().strftime("%Y-%m-%d %H")  # ساعة واحدة بين كل تنبيه
+
     for num, trade in list(data["portfolio"].items()):
         try:
             price     = round(yf.Ticker(trade["ticker"]).fast_info.last_price, 2)
@@ -479,7 +495,7 @@ def check_portfolio():
             profit    = round((price - buy_price) * shares, 2)
             profit_pct= round((price - buy_price) / buy_price * 100, 2)
 
-            if target and price >= target:
+            if target and price >= target and alerts.get(f"{num}_target") != now:
                 send_telegram(
                     f"🎯 *حان وقت البيع!*\n"
                     f"━━━━━━━━━━━━━━━━━━━\n"
@@ -489,7 +505,9 @@ def check_portfolio():
                     f"💵 ربحك: +${profit} (+{profit_pct}%)\n\n"
                     f"رد: /بعت {num}"
                 )
-            elif stop_loss and price <= stop_loss * 1.02 and price > stop_loss:
+                alerts[f"{num}_target"] = now
+
+            elif stop_loss and price <= stop_loss * 1.02 and price > stop_loss and alerts.get(f"{num}_warn") != now:
                 send_telegram(
                     f"⚠️ *تحذير!*\n"
                     f"━━━━━━━━━━━━━━━━━━━\n"
@@ -498,7 +516,9 @@ def check_portfolio():
                     f"🔴 وقف الخسارة: ${stop_loss}\n"
                     f"رد: /بعت {num}"
                 )
-            elif stop_loss and price <= stop_loss:
+                alerts[f"{num}_warn"] = now
+
+            elif stop_loss and price <= stop_loss and alerts.get(f"{num}_stop") != now:
                 send_telegram(
                     f"🔴 *بيع فوراً!*\n"
                     f"━━━━━━━━━━━━━━━━━━━\n"
@@ -507,9 +527,12 @@ def check_portfolio():
                     f"📉 الخسارة: -${abs(profit)} ({profit_pct}%)\n\n"
                     f"رد: /بعت {num}"
                 )
+                alerts[f"{num}_stop"] = now
+
         except Exception as e:
             logger.error(f"خطأ في متابعة {trade['ticker']}: {e}")
 
+    data["portfolio_alerts"] = alerts
     save_data(data)
 
 # ══════════════════════════════════════════════
@@ -522,8 +545,7 @@ def morning_briefing():
 
     inv_list  = "، ".join(TODAY_INVESTMENT[:10])
     spec_list = "، ".join(TODAY_SPECULATIVE[:5])
-
-    data = load_data()
+    data      = load_data()
 
     send_telegram(
         f"🌅 *صباح الخير! السوق يفتح بعد 30 دقيقة*\n"
@@ -532,14 +554,15 @@ def morning_briefing():
         f"⚡ نسبة المخاطرة: {data['risk_pct']}%\n\n"
         f"🔵 *أفضل أسهم الاستثمار اليوم:*\n{inv_list}\n\n"
         f"🟡 *أفضل أسهم المضاربة اليوم:*\n{spec_list}\n\n"
-        f"⏰ سأبدأ إرسال التوصيات عند الفتح"
+        f"⏰ سأبدأ إرسال التوصيات عند الفتح الساعة 9:30 صباحاً بتوقيت نيويورك\n"
+        f"(4:00 مساءً بتوقيت السعودية تقريباً)"
     )
 
 # ══════════════════════════════════════════════
 # ملخص نهاية اليوم
 # ══════════════════════════════════════════════
 def end_of_day():
-    global sent_today, TODAY_INVESTMENT, TODAY_SPECULATIVE
+    global TODAY_INVESTMENT, TODAY_SPECULATIVE
     data = load_data()
 
     portfolio_profit = 0
@@ -567,37 +590,37 @@ def end_of_day():
 
     send_telegram("\n".join(lines))
 
-    data["signal_counter"] = 0
-    data["signals"]        = {}
-    sent_today             = {}
-    TODAY_INVESTMENT       = []
-    TODAY_SPECULATIVE      = []
+    # تصفير اليوم مع الاحتفاظ بالمحفظة والتاريخ
+    data["signal_counter"]   = 0
+    data["signals"]          = {}
+    data["sent_today"]       = {}
+    data["portfolio_alerts"] = {}
+    TODAY_INVESTMENT         = []
+    TODAY_SPECULATIVE        = []
     save_data(data)
 
 # ══════════════════════════════════════════════
 # ملخص أسبوعي
 # ══════════════════════════════════════════════
 def weekly_summary():
-    data = load_data()
+    data    = load_data()
     history = data.get("history", [])
 
-    # صفقات هذا الأسبوع فقط
-    week_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
-    week_trades = [t for t in history if t.get("date", "") >= week_ago]
+    week_ago    = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+    # إصلاح: البحث في "date_sell" مو "date"
+    week_trades = [t for t in history if t.get("date_sell", "") >= week_ago]
 
     if not week_trades:
         send_telegram("📊 *ملخص الأسبوع*\nما في صفقات مغلقة هذا الأسبوع.")
         return
 
     total_profit = sum(t.get("profit", 0) for t in week_trades)
-    winning = [t for t in week_trades if t.get("profit", 0) > 0]
-    losing  = [t for t in week_trades if t.get("profit", 0) < 0]
-    win_rate = round(len(winning) / len(week_trades) * 100) if week_trades else 0
-
-    best  = max(week_trades, key=lambda x: x.get("profit", 0))
-    worst = min(week_trades, key=lambda x: x.get("profit", 0))
-
-    icon = "💵" if total_profit >= 0 else "📉"
+    winning      = [t for t in week_trades if t.get("profit", 0) > 0]
+    losing       = [t for t in week_trades if t.get("profit", 0) < 0]
+    win_rate     = round(len(winning) / len(week_trades) * 100) if week_trades else 0
+    best         = max(week_trades, key=lambda x: x.get("profit", 0))
+    worst        = min(week_trades, key=lambda x: x.get("profit", 0))
+    icon         = "💵" if total_profit >= 0 else "📉"
 
     send_telegram(
         f"📊 *ملخص الأسبوع*\n"
@@ -607,11 +630,10 @@ def weekly_summary():
         f"❌ الخاسرة: {len(losing)}\n"
         f"📈 نسبة النجاح: {win_rate}%\n\n"
         f"{icon} *صافي الربح: ${total_profit:+.2f}*\n\n"
-        f"🏆 أفضل صفقة: {best['ticker']} +${best.get('profit', 0):.2f}\n"
-        f"💀 أسوأ صفقة: {worst['ticker']} ${worst.get('profit', 0):.2f}"
+        f"🏆 أفضل صفقة: {best['ticker']} +${best.get('profit',0):.2f}\n"
+        f"💀 أسوأ صفقة: {worst['ticker']} ${worst.get('profit',0):.2f}"
     )
 
-    # تصفير السجل الأسبوعي
     data["weekly_signals"] = []
     save_data(data)
 
@@ -620,7 +642,7 @@ def weekly_summary():
 # ══════════════════════════════════════════════
 def process_command(msg, chat_id):
     data = load_data()
-    msg = msg.strip()
+    msg  = msg.strip()
 
     # /اشتريت
     if msg.startswith("/اشتريت"):
@@ -628,18 +650,25 @@ def process_command(msg, chat_id):
         if len(parts) >= 2:
             num = ''.join(filter(str.isdigit, parts[1]))
             if num in data["signals"]:
+                # التحقق إذا موجودة مسبقاً
+                if num in data["portfolio"]:
+                    send_telegram(f"⚠️ الصفقة {num} مسجلة مسبقاً في محفظتك.", chat_id)
+                    return
                 signal = data["signals"][num]
-                shares = calc_position_size(
-                    signal["price"], signal["stop_loss"],
-                    data["capital"], data["risk_pct"]
-                )
-                expected_profit = calc_expected_profit(signal["price"], signal["target"], shares)
-                max_loss = round((signal["price"] - signal["stop_loss"]) * shares, 2) if signal.get("stop_loss") else 0
+                # جلب السعر الحالي مو سعر التوصية
+                try:
+                    current_price = round(yf.Ticker(signal["ticker"]).fast_info.last_price, 2)
+                except:
+                    current_price = signal["price"]
+
+                shares          = calc_position_size(current_price, signal["stop_loss"], data["capital"], data["risk_pct"])
+                expected_profit = calc_expected_profit(current_price, signal["target"], shares)
+                max_loss        = round(abs(current_price - signal["stop_loss"]) * shares, 2) if signal.get("stop_loss") else 0
 
                 data["portfolio"][num] = {
                     "ticker":    signal["ticker"],
                     "shares":    shares,
-                    "buy_price": signal["price"],
+                    "buy_price": current_price,
                     "stop_loss": signal["stop_loss"],
                     "target":    signal["target"],
                     "mode":      signal["mode"],
@@ -650,8 +679,8 @@ def process_command(msg, chat_id):
                     f"✅ *تم التسجيل!*\n"
                     f"━━━━━━━━━━━━━━━━━━━\n"
                     f"📊 {signal['ticker']} — {shares} سهم\n"
-                    f"💰 سعر الشراء: ${signal['price']}\n"
-                    f"💵 إجمالي الاستثمار: ${round(signal['price'] * shares, 2):,}\n"
+                    f"💰 سعر الشراء الحالي: ${current_price}\n"
+                    f"💵 إجمالي الاستثمار: ${round(current_price * shares, 2):,}\n"
                     f"🔴 أقصى خسارة: ${max_loss}\n"
                     f"🎯 الربح المتوقع: +${expected_profit}",
                     chat_id
@@ -665,18 +694,29 @@ def process_command(msg, chat_id):
         if len(parts) >= 2:
             if parts[1] == "كل":
                 total_profit = 0
+                failed       = []
+                today_date   = datetime.now().strftime("%Y-%m-%d")
                 for num, trade in list(data["portfolio"].items()):
                     try:
                         price  = round(yf.Ticker(trade["ticker"]).fast_info.last_price, 2)
                         profit = round((price - trade["buy_price"]) * trade["shares"], 2)
                         total_profit += profit
-                        data["history"].append({**trade, "sell_price": price, "profit": profit})
-                    except:
-                        pass
-                data["portfolio"] = {}
+                        data["history"].append({
+                            **trade,
+                            "sell_price": price,
+                            "profit":     profit,
+                            "date_sell":  today_date,
+                        })
+                        del data["portfolio"][num]
+                    except Exception as e:
+                        logger.error(f"فشل بيع {trade['ticker']}: {e}")
+                        failed.append(trade["ticker"])
                 save_data(data)
                 icon = "💵" if total_profit >= 0 else "📉"
-                send_telegram(f"✅ تم بيع كل الصفقات\n{icon} إجمالي: ${total_profit:+.2f}", chat_id)
+                msg  = f"✅ تم بيع الصفقات\n{icon} إجمالي: ${total_profit:+.2f}"
+                if failed:
+                    msg += f"\n⚠️ تعذر بيع: {', '.join(failed)} — حاول مرة ثانية"
+                send_telegram(msg, chat_id)
                 return
 
             num = ''.join(filter(str.isdigit, parts[1]))
@@ -687,7 +727,12 @@ def process_command(msg, chat_id):
                     profit = round((price - trade["buy_price"]) * trade["shares"], 2)
                     pct    = round((price - trade["buy_price"]) / trade["buy_price"] * 100, 2)
                     icon   = "💵 ربحت" if profit >= 0 else "📉 خسرت"
-                    data["history"].append({**trade, "sell_price": price, "profit": profit, "date_sell": datetime.now().strftime("%Y-%m-%d")})
+                    data["history"].append({
+                        **trade,
+                        "sell_price": price,
+                        "profit":     profit,
+                        "date_sell":  datetime.now().strftime("%Y-%m-%d"),
+                    })
                     del data["portfolio"][num]
                     save_data(data)
                     send_telegram(
@@ -709,7 +754,7 @@ def process_command(msg, chat_id):
         if not data["portfolio"]:
             send_telegram("📊 محفظتك فارغة حالياً", chat_id)
             return
-        lines = ["━━━━━━━━━━━━━━━━━━━\n📊 *محفظتك الآن*"]
+        lines        = ["━━━━━━━━━━━━━━━━━━━\n📊 *محفظتك الآن*"]
         total_profit = 0
         for num, trade in data["portfolio"].items():
             try:
@@ -734,8 +779,8 @@ def process_command(msg, chat_id):
         parts = msg.split()
         if len(parts) >= 2:
             try:
-                new_capital = float(parts[1])
-                data["capital"] = new_capital
+                new_capital      = float(parts[1])
+                data["capital"]  = new_capital
                 save_data(data)
                 send_telegram(f"✅ تم تحديث رأس المال إلى ${new_capital:,}", chat_id)
             except:
@@ -764,7 +809,7 @@ def process_command(msg, chat_id):
     elif "/اسبوع" in msg or "/weekly" in msg:
         weekly_summary()
 
-    # /حلل
+    # /حلل - يستخدم كل المؤشرات الـ 8
     elif msg.startswith("/حلل"):
         parts = msg.split()
         if len(parts) >= 2:
@@ -772,25 +817,34 @@ def process_command(msg, chat_id):
             try:
                 last, prev, price_info, df = fetch_and_analyze(ticker)
                 if last is not None:
-                    rsi = round(last["rsi"], 1)
-                    adx = round(last["adx"], 1)
-                    vwap = round(last["vwap"], 2)
-                    rec = "🟢 شراء" if rsi < 35 else ("🔴 بيع" if rsi > 65 else "🟡 انتظر")
+                    signal = generate_signal(ticker, last, prev, price_info, "investment")
+                    rsi    = round(last["rsi"],  1)
+                    adx    = round(last["adx"],  1)
+                    macd   = round(last["macd"], 4)
+                    bb     = round(last["bb_pct"], 2)
+                    rec    = signal["action"] if signal else "🟡 انتظر"
+                    conf   = f" — ثقة {signal['confidence']}%" if signal else ""
+
                     send_telegram(
                         f"📊 *{ticker}*\n"
                         f"━━━━━━━━━━━━━━━━━━━\n"
                         f"💰 السعر: ${price_info['price']}\n"
                         f"📈 التغيير: {price_info['change_pct']:+.2f}%\n"
+                        f"━━━━━━━━━━━━━━━━━━━\n"
                         f"📊 RSI: {rsi}\n"
+                        f"📊 MACD: {macd}\n"
+                        f"📊 Bollinger: {bb:.0%}\n"
                         f"📊 ADX: {adx} ({'اتجاه قوي' if adx > 25 else 'اتجاه ضعيف'})\n"
-                        f"📊 VWAP: ${vwap}\n"
-                        f"🎯 التوصية: {rec}",
+                        f"━━━━━━━━━━━━━━━━━━━\n"
+                        f"🎯 التوصية: {rec}{conf}",
                         chat_id
                     )
                 else:
                     send_telegram(f"❌ تعذر تحليل {ticker}", chat_id)
-            except:
+            except Exception as e:
                 send_telegram("❌ تعذر جلب البيانات", chat_id)
+        else:
+            send_telegram("❌ مثال: /حلل AAPL", chat_id)
 
     # /السوق
     elif "/السوق" in msg:
@@ -816,7 +870,7 @@ def process_command(msg, chat_id):
         total = 0
         for trade in data["portfolio"].values():
             try:
-                price = yf.Ticker(trade["ticker"]).fast_info.last_price
+                price  = yf.Ticker(trade["ticker"]).fast_info.last_price
                 total += (price - trade["buy_price"]) * trade["shares"]
             except:
                 pass
@@ -834,7 +888,7 @@ def process_command(msg, chat_id):
             "• /بعت كل — إغلاق الكل\n"
             "• /محفظتي — عرض صفقاتك\n"
             "• /ربحي — إجمالي الربح\n"
-            "• /حلل AAPL — تحليل سهم\n"
+            "• /حلل AAPL — تحليل سهم (8 مؤشرات)\n"
             "• /السوق — حالة السوق\n"
             "• /capital 10000 — تعديل رأس المال\n"
             "• /risk 1 — تعديل نسبة المخاطرة\n"
@@ -845,47 +899,50 @@ def process_command(msg, chat_id):
 # ══════════════════════════════════════════════
 # استقبال الأوامر من تلغرام
 # ══════════════════════════════════════════════
-last_update_id = 0
-
 def check_telegram_updates():
-    global last_update_id
+    data = load_data()
+    last_id = data.get("last_update_id", 0)
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
-        r = requests.get(url, params={"offset": last_update_id + 1, "timeout": 10}, timeout=15)
+        r = requests.get(url, params={"offset": last_id + 1, "timeout": 5}, timeout=8)
         updates = r.json().get("result", [])
+        changed = False
         for update in updates:
-            last_update_id = update["update_id"]
-            msg = update.get("message", {})
-            text = msg.get("text", "")
+            last_id = update["update_id"]
+            changed = True
+            msg     = update.get("message", {})
+            text    = msg.get("text", "")
             chat_id = str(msg.get("chat", {}).get("id", ""))
             if text and chat_id:
                 logger.info(f"📩 أمر: {text}")
                 process_command(text, chat_id)
+        if changed:
+            data = load_data()
+            data["last_update_id"] = last_id
+            save_data(data)
     except Exception as e:
         logger.error(f"خطأ في getUpdates: {e}")
 
 # ══════════════════════════════════════════════
-# خادم HTTP صغير - فقط لإرضاء Render (يحتاج بورت مفتوح)
+# خادم HTTP - يبقي Render صاحياً
 # ══════════════════════════════════════════════
 class PingHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b'Bot is running!')
-
     def log_message(self, format, *args):
         pass
 
 def run_ping_server():
-    port = int(os.environ.get("PORT", 8080))
+    port   = int(os.environ.get("PORT", 8080))
     server = HTTPServer(('0.0.0.0', port), PingHandler)
     logger.info(f"🌐 خادم Ping يعمل على port {port}")
     server.serve_forever()
 
 def self_ping():
     try:
-        url = os.environ.get("RENDER_URL", "https://stock-bot-ilzq.onrender.com")
-        requests.get(url, timeout=10)
+        requests.get(RENDER_URL, timeout=8)
         logger.info("🏓 Self-ping ✅")
     except Exception as e:
         logger.warning(f"🏓 Self-ping فشل: {e}")
@@ -894,14 +951,15 @@ def self_ping():
 # التشغيل
 # ══════════════════════════════════════════════
 if __name__ == "__main__":
+    if not validate_config():
+        exit(1)
+
     logger.info("🚀 يعمل بوت الأسهم الذكي - تلغرام!")
 
-    # تشغيل خادم Ping في خلفية (مطلوب من Render)
+    # تشغيل خادم Ping في خلفية
     server_thread = threading.Thread(target=run_ping_server, daemon=True)
     server_thread.start()
 
-
-    # إرسال رسالة ترحيب
     send_telegram(
         "🚀 *بوت الأسهم الذكي شغال!*\n"
         "━━━━━━━━━━━━━━━━━━━\n"
@@ -909,30 +967,33 @@ if __name__ == "__main__":
         "أرسل /مساعدة لقائمة الأوامر"
     )
 
-    analyze_all()
+    scheduler = BlockingScheduler(timezone="America/New_York")
 
-    scheduler = BlockingScheduler(timezone=pytz.timezone("America/New_York"))
-
-    # تحليل الأسهم كل 5 دقائق
-    scheduler.add_job(analyze_all, "interval", minutes=CHECK_INTERVAL_MINUTES)
+    # تحليل الأسهم 3 مرات يومياً (البيانات يومية، ما فايدة من تكرارها كل 30 دقيقة)
+    scheduler.add_job(analyze_all, CronTrigger(
+        hour="9,12,15", minute=35, day_of_week="mon-fri", timezone="America/New_York"))
 
     # متابعة المحفظة كل دقيقة
     scheduler.add_job(check_portfolio, "interval", minutes=1)
 
     # استقبال الأوامر كل 10 ثواني
-    scheduler.add_job(check_telegram_updates, "interval", seconds=10)
+    scheduler.add_job(check_telegram_updates, "interval", seconds=10,
+                      max_instances=1, coalesce=True)
 
-    # ملخص نهاية اليوم
-    scheduler.add_job(end_of_day, CronTrigger(hour=16, minute=5, day_of_week="mon-fri"))
+    # ملخص صباحي الساعة 9:00 بتوقيت نيويورك (4:00 مساءً السعودية)
+    scheduler.add_job(morning_briefing, CronTrigger(
+        hour=9, minute=0, day_of_week="mon-fri", timezone="America/New_York"))
 
-    # ملخص صباحي
-    scheduler.add_job(morning_briefing, CronTrigger(hour=9, minute=0, day_of_week="mon-fri"))
+    # ملخص نهاية اليوم الساعة 4:05 مساءً نيويورك (11:05 مساءً السعودية)
+    scheduler.add_job(end_of_day, CronTrigger(
+        hour=16, minute=5, day_of_week="mon-fri", timezone="America/New_York"))
 
-    # ملخص أسبوعي (الجمعة بعد إغلاق السوق)
-    scheduler.add_job(weekly_summary, CronTrigger(hour=16, minute=30, day_of_week="fri"))
+    # ملخص أسبوعي الجمعة
+    scheduler.add_job(weekly_summary, CronTrigger(
+        hour=16, minute=30, day_of_week="fri", timezone="America/New_York"))
 
-    # self-ping كل 10 دقايق عشان ما ينام على Render
-    scheduler.add_job(self_ping, "interval", minutes=10)
+    # self-ping كل 5 دقايق عشان ما ينام Render
+    scheduler.add_job(self_ping, "interval", minutes=5)
 
     try:
         scheduler.start()
