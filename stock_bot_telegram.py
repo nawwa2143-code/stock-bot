@@ -278,14 +278,28 @@ def generate_signal(ticker, last, prev, price_info, mode="investment"):
     atr     = last["atr"]
     atr_pct = round(atr / price * 100, 1)
 
+    adx = last["adx"]
+    if adx >= 35:
+        speed_label = "اتجاه قوي جداً ⚡⚡"
+        multiplier  = 0.8
+    elif adx >= 25:
+        speed_label = "اتجاه قوي ⚡"
+        multiplier  = 1.2
+    elif adx >= 15:
+        speed_label = "اتجاه متوسط 〰️"
+        multiplier  = 1.8
+    else:
+        speed_label = "اتجاه ضعيف 🐢"
+        multiplier  = 2.5
+
     if mode == "investment":
         stop_loss = round(price - (atr * 2), 2)
         target    = round(price + (atr * 3), 2)
-        days_est  = max(3, round(abs(target - price) / atr * 1.5))
+        days_est  = max(2, round(abs(target - price) / atr * multiplier))
     else:
         stop_loss = round(price - (atr * 1.5), 2)
         target    = round(price + (atr * 4),   2)
-        days_est  = max(1, round(abs(target - price) / atr))
+        days_est  = max(1, round(abs(target - price) / atr * multiplier * 0.7))
 
     stop_pct   = round((price - stop_loss) / price * 100, 1)
     target_pct = round((target - price)    / price * 100, 1)
@@ -300,7 +314,7 @@ def generate_signal(ticker, last, prev, price_info, mode="investment"):
             "confidence": conf, "reasons": reasons_buy,
             "stop_loss": stop_loss, "stop_pct": stop_pct,
             "target": target, "target_pct": target_pct,
-            "atr_pct": atr_pct, "days_est": days_est,
+            "atr_pct": atr_pct, "days_est": days_est, "speed_label": speed_label,
         }
 
     if sell > buy:
@@ -316,7 +330,7 @@ def generate_signal(ticker, last, prev, price_info, mode="investment"):
             "confidence": conf, "reasons": reasons_sell,
             "stop_loss": stop_loss_sell, "stop_pct": round((stop_loss_sell - price) / price * 100, 1),
             "target": target_sell, "target_pct": round((price - target_sell) / price * 100, 1),
-            "atr_pct": atr_pct, "days_est": days_est,
+            "atr_pct": atr_pct, "days_est": days_est, "speed_label": speed_label,
         }
 
     return None
@@ -368,7 +382,7 @@ def format_signal_message(signal, number, capital, risk_pct):
             f"🎯 *الهدف:* ${signal['target']} ({signal['target_pct']}%)",
         ]
     if signal.get("days_est"):
-        lines.append(f"⏱ *المدة المتوقعة:* {signal['days_est']} أيام")
+        lines.append(f"⏱ *المدة المتوقعة:* {signal['days_est']} أيام — {signal.get('speed_label', '')}")
 
     if shares > 0:
         lines += [
@@ -542,21 +556,93 @@ def morning_briefing():
     global TODAY_INVESTMENT, TODAY_SPECULATIVE
     TODAY_INVESTMENT  = get_smart_investment_list()
     TODAY_SPECULATIVE = get_smart_speculative_list()
+    data = load_data()
 
-    inv_list  = "، ".join(TODAY_INVESTMENT[:10])
-    spec_list = "، ".join(TODAY_SPECULATIVE[:5])
-    data      = load_data()
-
+    # رسالة افتتاحية
     send_telegram(
         f"🌅 *صباح الخير! السوق يفتح بعد 30 دقيقة*\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"💼 رأس مالك: ${data['capital']:,}\n"
         f"⚡ نسبة المخاطرة: {data['risk_pct']}%\n\n"
-        f"🔵 *أفضل أسهم الاستثمار اليوم:*\n{inv_list}\n\n"
-        f"🟡 *أفضل أسهم المضاربة اليوم:*\n{spec_list}\n\n"
-        f"⏰ سأبدأ إرسال التوصيات عند الفتح الساعة 9:30 صباحاً بتوقيت نيويورك\n"
-        f"(4:00 مساءً بتوقيت السعودية تقريباً)"
+        f"🔍 جاري تحليل الأسهم وتحضير التوصيات..."
     )
+
+    # تحليل مسبق للأسهم قبل الفتح
+    investment_signals  = []
+    speculative_signals = []
+
+    for ticker in TODAY_INVESTMENT[:30]:
+        try:
+            time.sleep(0.4)
+            last, prev, price_info, df = fetch_and_analyze(ticker)
+            if last is None or price_info["price"] < 20:
+                continue
+            signal = generate_signal(ticker, last, prev, price_info, "investment")
+            if signal:
+                investment_signals.append(signal)
+        except:
+            pass
+
+    for ticker in TODAY_SPECULATIVE[:20]:
+        try:
+            time.sleep(0.4)
+            last, prev, price_info, df = fetch_and_analyze(ticker)
+            if last is None or not (1 <= price_info["price"] <= 20):
+                continue
+            signal = generate_signal(ticker, last, prev, price_info, "speculative")
+            if signal:
+                speculative_signals.append(signal)
+        except:
+            pass
+
+    top_investment  = sorted(investment_signals,  key=lambda x: x["confidence"], reverse=True)[:3]
+    top_speculative = sorted(speculative_signals, key=lambda x: x["confidence"], reverse=True)[:2]
+    all_signals     = top_investment + top_speculative
+
+    if not all_signals:
+        # ما في إشارات واضحة — عرض القائمة فقط
+        inv_list  = "، ".join(TODAY_INVESTMENT[:10])
+        spec_list = "، ".join(TODAY_SPECULATIVE[:5])
+        send_telegram(
+            f"📋 *الأسهم على الرادار اليوم:*\n"
+            f"━━━━━━━━━━━━━━━━━━━\n"
+            f"🔵 استثمار: {inv_list}\n\n"
+            f"🟡 مضاربة: {spec_list}\n\n"
+            f"⏰ سأرسل التوصيات التفصيلية عند فتح السوق 9:30 نيويورك\n"
+            f"(4:00 مساءً بتوقيت السعودية)"
+        )
+        return
+
+    # حفظ الإشارات في data وإرسالها مع التفاصيل الكاملة
+    today = datetime.now().strftime("%Y-%m-%d")
+    sent_today = data.get("sent_today", {})
+    if sent_today.get("_date") != today:
+        sent_today = {"_date": today}
+
+    send_telegram(
+        f"📊 *توصيات ما قبل الفتح — {today}*\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"⚠️ هذه تحليلات مبنية على بيانات الإغلاق الأمس.\n"
+        f"التوصيات النهائية تصدر بعد فتح السوق عند 9:35 نيويورك."
+    )
+
+    for signal in all_signals:
+        data["signal_counter"] += 1
+        num = data["signal_counter"]
+        data["signals"][str(num)] = {
+            **signal,
+            "number":    num,
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "bought":    False,
+        }
+        data["weekly_signals"].append(str(num))
+        msg = format_signal_message(signal, num, data["capital"], data["risk_pct"])
+        send_telegram(msg)
+        sent_today[signal["ticker"]] = signal["action_en"]
+        time.sleep(0.5)
+
+    data["sent_today"] = sent_today
+    save_data(data)
 
 # ══════════════════════════════════════════════
 # ملخص نهاية اليوم
