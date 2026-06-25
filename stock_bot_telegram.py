@@ -17,13 +17,13 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 RENDER_URL       = os.environ.get("RENDER_URL", "https://stock-bot-ilzq.onrender.com")
 MIN_CONFIDENCE   = 60
 
-# العطل الرسمية الأمريكية 2025-2026
-US_HOLIDAYS = {
-    "2025-01-01","2025-01-20","2025-02-17","2025-04-18","2025-05-26",
-    "2025-06-19","2025-07-04","2025-09-01","2025-11-27","2025-12-25",
-    "2026-01-01","2026-01-19","2026-02-16","2026-04-03","2026-05-25",
-    "2026-06-19","2026-07-03","2026-09-07","2026-11-26","2026-12-25",
-}
+# العطل الرسمية الأمريكية — تلقائي
+import holidays as _holidays_lib
+def _get_us_holidays():
+    current_year = datetime.now().year
+    h = _holidays_lib.US(years=[current_year, current_year + 1])
+    return {d.strftime("%Y-%m-%d") for d in h.keys()}
+US_HOLIDAYS = _get_us_holidays()
 
 import yfinance as yf
 import pandas as pd
@@ -638,10 +638,8 @@ def morning_briefing():
         data["weekly_signals"].append(str(num))
         msg = format_signal_message(signal, num, data["capital"], data["risk_pct"])
         send_telegram(msg)
-        sent_today[signal["ticker"]] = signal["action_en"]
         time.sleep(0.5)
 
-    data["sent_today"] = sent_today
     save_data(data)
 
 # ══════════════════════════════════════════════
