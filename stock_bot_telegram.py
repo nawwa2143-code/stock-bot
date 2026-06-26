@@ -893,6 +893,11 @@ def process_command(msg, chat_id):
     elif "/اسبوع" in msg or "/weekly" in msg:
         weekly_summary()
 
+    # /حلل_الكل
+    elif "/حلل_الكل" in msg:
+        send_telegram("🔍 جاري تحليل السوق الآن...", chat_id)
+        threading.Thread(target=analyze_all).start()
+
     # /حلل - يستخدم كل المؤشرات الـ 8
     elif msg.startswith("/حلل"):
         parts = msg.split()
@@ -980,11 +985,6 @@ def process_command(msg, chat_id):
             "• /اسبوع — ملخص الأسبوع",
             chat_id
         )
-
-    # /حلل_الكل
-    elif "/حلل_الكل" in msg:
-        send_telegram("🔍 جاري تحليل السوق الآن...", chat_id)
-        threading.Thread(target=analyze_all).start()
 
 # ══════════════════════════════════════════════
 # استقبال الأوامر من تلغرام
