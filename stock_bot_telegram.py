@@ -496,8 +496,9 @@ def check_portfolio():
     if not data["portfolio"]:
         return
 
-    alerts = data.get("portfolio_alerts", {})
-    now    = datetime.now().strftime("%Y-%m-%d %H")  # ساعة واحدة بين كل تنبيه
+    alerts  = data.get("portfolio_alerts", {})
+    now     = datetime.now().strftime("%Y-%m-%d %H")
+    changed = False
 
     for num, trade in list(data["portfolio"].items()):
         try:
@@ -509,6 +510,30 @@ def check_portfolio():
             profit    = round((price - buy_price) * shares, 2)
             profit_pct= round((price - buy_price) / buy_price * 100, 2)
 
+            # Trailing Stop — يرفع وقف الخسارة لما السعر يرتفع
+            if price > buy_price:
+                trail_pct      = 0.03   # 3% تحت أعلى سعر
+                peak           = trade.get("peak_price", buy_price)
+                new_peak       = max(peak, price)
+                new_trail_stop = round(new_peak * (1 - trail_pct), 2)
+                if new_peak > peak or new_trail_stop > stop_loss:
+                    data["portfolio"][num]["peak_price"] = new_peak
+                    if new_trail_stop > stop_loss:
+                        data["portfolio"][num]["stop_loss"] = new_trail_stop
+                        stop_loss = new_trail_stop
+                        changed = True
+                        if alerts.get(f"{num}_trail") != now:
+                            send_telegram(
+                                f"📈 *Trailing Stop محدّث*\n"
+                                f"━━━━━━━━━━━━━━━━━━━\n"
+                                f"{num}⃣ *{trade['ticker']}*\n"
+                                f"💰 السعر: ${price}\n"
+                                f"🔴 وقف الخسارة الجديد: ${new_trail_stop}\n"
+                                f"🛡️ ربحك المحمي: +${round((new_trail_stop - buy_price) * shares, 2)}"
+                            )
+                            alerts[f"{num}_trail"] = now
+
+            # وصل الهدف
             if target and price >= target and alerts.get(f"{num}_target") != now:
                 send_telegram(
                     f"🎯 *حان وقت البيع!*\n"
@@ -674,8 +699,7 @@ def end_of_day():
 
     send_telegram("\n".join(lines))
 
-    # تصفير اليوم مع الاحتفاظ بالمحفظة والتاريخ
-    data["signal_counter"]   = 0
+    # تصفير اليوم مع الاحتفاظ بالمحفظة والتاريخ والعداد
     data["signals"]          = {}
     data["sent_today"]       = {}
     data["portfolio_alerts"] = {}
@@ -722,8 +746,226 @@ def weekly_summary():
     save_data(data)
 
 # ══════════════════════════════════════════════
-# معالجة الأوامر
+# سجل أداء البوت
 # ══════════════════════════════════════════════
+def bot_performance(chat_id=None):
+    data    = load_data()
+    history = data.get("history", [])
+
+    if not history:
+        send_telegram("📊 ما في صفقات مغلقة بعد لتحليل الأداء.", chat_id)
+        return
+
+    total        = len(history)
+    winning      = [t for t in history if t.get("profit", 0) > 0]
+    losing       = [t for t in history if t.get("profit", 0) < 0]
+    total_profit = sum(t.get("profit", 0) for t in history)
+    win_rate     = round(len(winning) / total * 100) if total else 0
+    avg_win      = round(sum(t["profit"] for t in winning) / len(winning), 2) if winning else 0
+    avg_loss     = round(sum(t["profit"] for t in losing)  / len(losing),  2) if losing  else 0
+    best         = max(history, key=lambda x: x.get("profit", 0))
+    worst        = min(history, key=lambda x: x.get("profit", 0))
+    profit_factor= round(abs(sum(t["profit"] for t in winning) / sum(t["profit"] for t in losing)), 2) if losing else "∞"
+
+    icon = "💵" if total_profit >= 0 else "📉"
+    send_telegram(
+        f"📈 *أداء البوت الكلي*\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"📋 إجمالي الصفقات: {total}\n"
+        f"✅ رابحة: {len(winning)} ({win_rate}%)\n"
+        f"❌ خاسرة: {len(losing)}\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"💰 متوسط الربح: +${avg_win}\n"
+        f"📉 متوسط الخسارة: ${avg_loss}\n"
+        f"⚖️ Profit Factor: {profit_factor}\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"{icon} *صافي الكل: ${total_profit:+.2f}*\n\n"
+        f"🏆 أفضل صفقة: {best['ticker']} +${best.get('profit',0):.2f}\n"
+        f"💀 أسوأ صفقة: {worst['ticker']} ${worst.get('profit',0):.2f}",
+        chat_id
+    )
+
+# ══════════════════════════════════════════════
+# Backtesting بسيط
+# ══════════════════════════════════════════════
+def backtest_ticker(ticker, chat_id=None):
+    send_telegram(f"🔬 جاري اختبار {ticker} على آخر 3 أشهر...", chat_id)
+    try:
+        stock = yf.Ticker(ticker)
+        df    = stock.history(period="3mo", interval="1d")
+        if df.empty or len(df) < 40:
+            send_telegram(f"❌ بيانات {ticker} غير كافية", chat_id)
+            return
+
+        c = df["Close"]; h = df["High"]; l = df["Low"]; v = df["Volume"]
+        df["rsi"]         = ta.momentum.RSIIndicator(c, window=14).rsi()
+        macd_obj          = ta.trend.MACD(c)
+        df["macd"]        = macd_obj.macd()
+        df["macd_signal"] = macd_obj.macd_signal()
+        df["ema9"]        = ta.trend.EMAIndicator(c, window=9).ema_indicator()
+        df["ema21"]       = ta.trend.EMAIndicator(c, window=21).ema_indicator()
+        df["atr"]         = ta.volatility.AverageTrueRange(h, l, c).average_true_range()
+        df["adx"]         = ta.trend.ADXIndicator(h, l, c, window=14).adx()
+        df = df.dropna()
+
+        trades   = []
+        in_trade = False
+        buy_p = stop = target = 0
+
+        for i in range(1, len(df)):
+            row  = df.iloc[i]
+            prev = df.iloc[i - 1]
+
+            if not in_trade:
+                buy_sig = (
+                    row["rsi"] < 40 and
+                    prev["macd"] < prev["macd_signal"] and row["macd"] > row["macd_signal"] and
+                    row["adx"] > 20
+                )
+                if buy_sig:
+                    buy_p  = round(row["Close"], 2)
+                    atr    = row["atr"]
+                    stop   = round(buy_p - atr * 2, 2)
+                    target = round(buy_p + atr * 3, 2)
+                    in_trade = True
+
+            else:
+                price = row["Close"]
+                if price >= target:
+                    profit = round(target - buy_p, 2)
+                    trades.append({"result": "win", "profit": profit, "pct": round(profit/buy_p*100,2)})
+                    in_trade = False
+                elif price <= stop:
+                    loss = round(stop - buy_p, 2)
+                    trades.append({"result": "loss", "profit": loss, "pct": round(loss/buy_p*100,2)})
+                    in_trade = False
+
+        if not trades:
+            send_telegram(f"📊 *Backtest {ticker}*\nما في إشارات في آخر 3 أشهر.", chat_id)
+            return
+
+        wins     = [t for t in trades if t["result"] == "win"]
+        losses   = [t for t in trades if t["result"] == "loss"]
+        win_rate = round(len(wins) / len(trades) * 100)
+        net      = round(sum(t["profit"] for t in trades), 2)
+        icon     = "💵" if net >= 0 else "📉"
+
+        send_telegram(
+            f"🔬 *Backtest {ticker} — آخر 3 أشهر*\n"
+            f"━━━━━━━━━━━━━━━━━━━\n"
+            f"📋 الصفقات: {len(trades)}\n"
+            f"✅ رابحة: {len(wins)} ({win_rate}%)\n"
+            f"❌ خاسرة: {len(losses)}\n"
+            f"{icon} *صافي: {net:+.2f}$ للسهم*\n\n"
+            f"⚠️ هذا اختبار تاريخي — لا يضمن المستقبل",
+            chat_id
+        )
+    except Exception as e:
+        send_telegram(f"❌ فشل الـ Backtest: {e}", chat_id)
+
+# ══════════════════════════════════════════════
+# تحليل القطاعات
+# ══════════════════════════════════════════════
+SECTORS = {
+    "تقنية 💻":   ["AAPL","MSFT","NVDA","AMD","GOOGL","META","TSLA","AVGO","QCOM","ORCL"],
+    "طاقة ⛽":    ["XOM","CVX","COP","SLB","EOG","PXD","MPC","VLO","OXY","HAL"],
+    "صحة 🏥":     ["JNJ","UNH","PFE","ABBV","MRK","LLY","AMGN","GILD","CVS","MDT"],
+    "بنوك 🏦":    ["JPM","BAC","WFC","GS","MS","C","USB","PNC","TFC","COF"],
+    "استهلاك 🛒": ["AMZN","WMT","HD","MCD","NKE","SBUX","TGT","COST","LOW","DG"],
+}
+
+def analyze_sectors(chat_id=None):
+    send_telegram("📊 جاري تحليل القطاعات...", chat_id)
+    results = []
+    for sector, tickers in SECTORS.items():
+        gains = []
+        for ticker in tickers[:5]:
+            try:
+                time.sleep(0.3)
+                info   = yf.Ticker(ticker).fast_info
+                price  = info.last_price
+                prev   = info.previous_close
+                if price and prev:
+                    gains.append(round((price - prev) / prev * 100, 2))
+            except:
+                pass
+        if gains:
+            avg = round(sum(gains) / len(gains), 2)
+            results.append((sector, avg))
+
+    if not results:
+        send_telegram("❌ تعذر جلب بيانات القطاعات", chat_id)
+        return
+
+    results.sort(key=lambda x: x[1], reverse=True)
+    lines = ["📊 *أداء القطاعات اليوم*", "━━━━━━━━━━━━━━━━━━━"]
+    for sector, avg in results:
+        icon = "🟢" if avg > 0 else "🔴"
+        bar  = "▓" * min(abs(int(avg * 2)), 10)
+        lines.append(f"{icon} {sector}: {avg:+.2f}% {bar}")
+    lines.append("━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"🏆 الأقوى: {results[0][0]}")
+    lines.append(f"📉 الأضعف: {results[-1][0]}")
+    send_telegram("\n".join(lines), chat_id)
+
+
+def check_portfolio_news():
+    """يفحص أخبار أسهم المحفظة ويرسل فقط أخبار آخر 6 ساعات"""
+    data = load_data()
+    if not data["portfolio"]:
+        return
+    tickers   = list({t["ticker"] for t in data["portfolio"].values()})
+    now_ts    = time.time()
+    six_hours = 6 * 3600
+    for ticker in tickers:
+        try:
+            news = yf.Ticker(ticker).news
+            if not news:
+                continue
+            for item in news[:3]:
+                content  = item.get("content", {})
+                title    = content.get("title", "")
+                url      = content.get("canonicalUrl", {}).get("url", "")
+                pub_date = content.get("pubDate", "")
+                # تحويل التاريخ للتحقق من الوقت
+                try:
+                    from datetime import timezone
+                    pub_ts = datetime.fromisoformat(pub_date.replace("Z", "+00:00")).timestamp()
+                    if now_ts - pub_ts > six_hours:
+                        continue  # تجاهل الأخبار القديمة
+                except:
+                    pass
+                if title:
+                    send_telegram(
+                        f"📰 *خبر — {ticker}*\n"
+                        f"━━━━━━━━━━━━━━━━━━━\n"
+                        f"{title}\n"
+                        f"{'🔗 ' + url if url else ''}"
+                    )
+                    break  # خبر واحد فقط لكل سهم
+        except:
+            pass
+
+def get_stock_news(ticker, chat_id=None):
+    try:
+        news = yf.Ticker(ticker).news
+        if not news:
+            send_telegram(f"📰 ما في أخبار حديثة لـ {ticker}", chat_id)
+            return
+        lines = [f"📰 *أحدث أخبار {ticker}*", "━━━━━━━━━━━━━━━━━━━"]
+        for item in news[:5]:
+            content = item.get("content", {})
+            title   = content.get("title", "")
+            url     = content.get("canonicalUrl", {}).get("url", "")
+            if title:
+                lines.append(f"• {title}")
+                if url:
+                    lines.append(f"  🔗 {url}")
+        send_telegram("\n".join(lines), chat_id)
+    except:
+        send_telegram(f"❌ تعذر جلب أخبار {ticker}", chat_id)
+
+
 def process_command(msg, chat_id):
     data = load_data()
     msg  = msg.strip()
@@ -893,10 +1135,20 @@ def process_command(msg, chat_id):
     elif "/اسبوع" in msg or "/weekly" in msg:
         weekly_summary()
 
+    # /قطاعات
+    elif "/قطاعات" in msg:
+        if not is_market_open():
+            send_telegram("🔴 السوق مقفل — جرب خلال ساعات التداول (4:30 - 11:00 مساءً)", chat_id)
+        else:
+            threading.Thread(target=analyze_sectors, args=(chat_id,)).start()
+
     # /حلل_الكل
     elif "/حلل_الكل" in msg:
-        send_telegram("🔍 جاري تحليل السوق الآن...", chat_id)
-        threading.Thread(target=analyze_all).start()
+        if not is_market_open():
+            send_telegram("🔴 السوق مقفل الآن\n⏰ يفتح 9:30 صباحاً نيويورك (4:30 مساءً السعودية)", chat_id)
+        else:
+            send_telegram("🔍 جاري تحليل السوق الآن...", chat_id)
+            threading.Thread(target=analyze_all).start()
 
     # /حلل - يستخدم كل المؤشرات الـ 8
     elif msg.startswith("/حلل"):
@@ -967,6 +1219,28 @@ def process_command(msg, chat_id):
         icon  = "💵" if total >= 0 else "📉"
         send_telegram(f"{icon} إجمالي ربحك الآن: ${total:+.2f}", chat_id)
 
+    # /أداء
+    elif "/أداء" in msg:
+        bot_performance(chat_id)
+
+    # /اختبر
+    elif msg.startswith("/اختبر"):
+        parts = msg.split()
+        if len(parts) >= 2:
+            ticker = parts[1].upper()
+            threading.Thread(target=backtest_ticker, args=(ticker, chat_id)).start()
+        else:
+            send_telegram("❌ مثال: /اختبر AAPL", chat_id)
+
+    # /أخبار
+    elif msg.startswith("/أخبار"):
+        parts = msg.split()
+        if len(parts) >= 2:
+            ticker = parts[1].upper()
+            threading.Thread(target=get_stock_news, args=(ticker, chat_id)).start()
+        else:
+            send_telegram("❌ مثال: /أخبار AAPL", chat_id)
+
     # /مساعدة
     elif "/مساعدة" in msg or "/start" in msg or "/help" in msg:
         send_telegram(
@@ -977,8 +1251,12 @@ def process_command(msg, chat_id):
             "• /بعت كل — إغلاق الكل\n"
             "• /محفظتي — عرض صفقاتك\n"
             "• /ربحي — إجمالي الربح\n"
-            "• /حلل AAPL — تحليل سهم (8 مؤشرات)\n"
+            "• /حلل AAPL — تحليل سهم\n"
             "• /حلل_الكل — تحليل السوق الآن\n"
+            "• /قطاعات — أداء القطاعات\n"
+            "• /اختبر AAPL — Backtest سهم\n"
+            "• /أخبار AAPL — أحدث أخبار سهم\n"
+            "• /أداء — إحصائيات البوت\n"
             "• /السوق — حالة السوق\n"
             "• /capital 10000 — تعديل رأس المال\n"
             "• /risk 1 — تعديل نسبة المخاطرة\n"
@@ -1081,6 +1359,10 @@ if __name__ == "__main__":
     # ملخص أسبوعي الجمعة
     scheduler.add_job(weekly_summary, CronTrigger(
         hour=16, minute=30, day_of_week="fri", timezone="America/New_York"))
+
+    # أخبار أسهم المحفظة مرتين يومياً
+    scheduler.add_job(check_portfolio_news, CronTrigger(
+        hour="10,14", minute=0, day_of_week="mon-fri", timezone="America/New_York"))
 
     # self-ping كل 5 دقايق عشان ما ينام Render
     scheduler.add_job(self_ping, "interval", minutes=5)
