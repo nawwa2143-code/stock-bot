@@ -13,8 +13,6 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 
 import holidays as _holidays_lib
 import yfinance as yf
-import pandas as pd
-import numpy as np
 import ta
 import pytz
 import requests
@@ -524,7 +522,7 @@ def analyze_all():
             if last is None or not (20 <= price_info["price"] <= 500):
                 continue
             signal = generate_signal(ticker, last, prev, price_info, "investment")
-            if signal and sent_today.get(ticker) != signal["action_en"]:
+            if signal and sent_today.get(ticker) not in [signal["action_en"], "BUY", "SELL"]:
                 sector = get_sector(ticker)
                 if sector not in sectors_used or sector == "أخرى":
                     investment_signals.append(signal)
@@ -540,7 +538,7 @@ def analyze_all():
             if last is None or not (5 <= price_info["price"] <= 20):
                 continue
             signal = generate_signal(ticker, last, prev, price_info, "speculative")
-            if signal and sent_today.get(ticker) != signal["action_en"]:
+            if signal and sent_today.get(ticker) not in [signal["action_en"], "BUY", "SELL"]:
                 speculative_signals.append(signal)
         except:
             pass
@@ -742,9 +740,11 @@ def morning_briefing():
         }
         data["weekly_signals"].append(str(num))
         send_telegram(format_signal_message(signal, num, data["capital"], data["risk_pct"]))
+        # نحفظ بعلامة MORNING عشان analyze_all ما يرسلها مرة ثانية
+        sent_today[signal["ticker"]] = "MORNING"
         time.sleep(0.5)
 
-    # لا نحفظ في sent_today عشان analyze_all يرسل من جديد بسعر حي
+    data["sent_today"] = sent_today
     save_data(data)
 
 # ══════════════════════════════════════════════
@@ -779,7 +779,12 @@ def end_of_day():
 
     send_telegram("\n".join(lines))
 
-    data["signals"]          = {}
+    # نحذف فقط signals أقدم من يومين — مو نصفر الكل
+    two_days_ago = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d")
+    data["signals"] = {
+        k: v for k, v in data["signals"].items()
+        if v.get("timestamp", "")[:10] >= two_days_ago
+    }
     data["sent_today"]       = {}
     data["portfolio_alerts"] = {}
     TODAY_INVESTMENT         = []
@@ -795,30 +800,139 @@ def weekly_summary():
     week_ago    = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
     week_trades = [t for t in history if t.get("date_sell", "") >= week_ago]
 
-    if not week_trades:
-        send_telegram("📊 *ملخص الأسبوع*\nما في صفقات مغلقة هذا الأسبوع.")
-        return
+    lines = ["📊 *ملخص الأسبوع*", "━━━━━━━━━━━━━━━━━━━"]
 
-    total_profit = sum(t.get("profit", 0) for t in week_trades)
-    winning      = [t for t in week_trades if t.get("profit", 0) > 0]
-    losing       = [t for t in week_trades if t.get("profit", 0) < 0]
-    win_rate     = round(len(winning) / len(week_trades) * 100)
-    best         = max(week_trades, key=lambda x: x.get("profit", 0))
-    worst        = min(week_trades, key=lambda x: x.get("profit", 0))
-    icon         = "💵" if total_profit >= 0 else "📉"
+    # الصفقات المغلقة هذا الأسبوع
+    if week_trades:
+        total_profit = sum(t.get("profit", 0) for t in week_trades)
+        winning      = [t for t in week_trades if t.get("profit", 0) > 0]
+        losing       = [t for t in week_trades if t.get("profit", 0) < 0]
+        win_rate     = round(len(winning) / len(week_trades) * 100)
+        icon         = "💵" if total_profit >= 0 else "📉"
+        lines += [
+            f"📋 الصفقات المغلقة: {len(week_trades)}",
+            f"✅ رابحة: {len(winning)} ({win_rate}%)",
+            f"❌ خاسرة: {len(losing)}",
+            f"{icon} *صافي المغلقة: ${total_profit:+.2f}*",
+        ]
+        if week_trades:
+            best  = max(week_trades, key=lambda x: x.get("profit", 0))
+            worst = min(week_trades, key=lambda x: x.get("profit", 0))
+            lines += [
+                f"🏆 أفضل: {best['ticker']} +${best.get('profit',0):.2f}",
+                f"💀 أسوأ: {worst['ticker']} ${worst.get('profit',0):.2f}",
+            ]
+    else:
+        lines.append("📋 ما في صفقات مغلقة هذا الأسبوع")
 
-    send_telegram(
-        f"📊 *ملخص الأسبوع*\n"
-        f"━━━━━━━━━━━━━━━━━━━\n"
-        f"📋 الصفقات: {len(week_trades)}\n"
-        f"✅ رابحة: {len(winning)} ({win_rate}%)\n"
-        f"❌ خاسرة: {len(losing)}\n"
-        f"{icon} *صافي: ${total_profit:+.2f}*\n\n"
-        f"🏆 أفضل: {best['ticker']} +${best.get('profit',0):.2f}\n"
-        f"💀 أسوأ: {worst['ticker']} ${worst.get('profit',0):.2f}"
-    )
+    # الصفقات المفتوحة حالياً
+    lines.append("\n💼 *الصفقات المفتوحة:*")
+    if data["portfolio"]:
+        open_profit = 0
+        for num, trade in data["portfolio"].items():
+            try:
+                price  = round(yf.Ticker(trade["ticker"]).fast_info.last_price, 2)
+                profit = round((price - trade["buy_price"]) * trade["shares"], 2)
+                pct    = round((price - trade["buy_price"]) / trade["buy_price"] * 100, 2)
+                icon   = "🟢" if profit >= 0 else "🔴"
+                open_profit += profit
+                days_held = (datetime.now() - datetime.strptime(trade["date"][:10], "%Y-%m-%d")).days
+                lines.append(
+                    f"{num}⃣ {trade['ticker']} | {days_held} يوم | {icon} ${profit:+.2f} ({pct:+.2f}%)"
+                )
+            except:
+                lines.append(f"{num}⃣ {trade['ticker']} | تعذر جلب السعر")
+        open_icon = "🟢" if open_profit >= 0 else "🔴"
+        lines.append(f"{open_icon} إجمالي المفتوحة: ${open_profit:+.2f}")
+    else:
+        lines.append("ما في صفقات مفتوحة")
+
+    lines += [
+        "━━━━━━━━━━━━━━━━━━━",
+        f"💼 رأس المال الحالي: ${data['capital']:,}",
+    ]
+
+    send_telegram("\n".join(lines))
     data["weekly_signals"] = []
     save_data(data)
+
+# ══════════════════════════════════════════════
+# ملخص شهري
+# ══════════════════════════════════════════════
+def monthly_summary():
+    _period_summary("شهر", 30, "📅")
+
+def quarterly_summary():
+    _period_summary("ربع سنة", 90, "📈")
+
+def semi_annual_summary():
+    _period_summary("نصف سنة", 180, "📊")
+
+def annual_summary():
+    _period_summary("سنة كاملة", 365, "🏆")
+
+def _period_summary(label, days, icon_header):
+    data         = load_data()
+    history      = data.get("history", [])
+    since        = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    trades       = [t for t in history if t.get("date_sell", "") >= since]
+
+    lines = [f"{icon_header} *ملخص {label}*", "━━━━━━━━━━━━━━━━━━━"]
+
+    if trades:
+        total_profit = sum(t.get("profit", 0) for t in trades)
+        winning      = [t for t in trades if t.get("profit", 0) > 0]
+        losing       = [t for t in trades if t.get("profit", 0) < 0]
+        win_rate     = round(len(winning) / len(trades) * 100)
+        avg_win      = round(sum(t["profit"] for t in winning) / len(winning), 2) if winning else 0
+        avg_loss     = round(sum(t["profit"] for t in losing)  / len(losing),  2) if losing  else 0
+        pf           = round(abs(sum(t["profit"] for t in winning) / sum(t["profit"] for t in losing)), 2) if losing else "∞"
+        best         = max(trades, key=lambda x: x.get("profit", 0))
+        worst        = min(trades, key=lambda x: x.get("profit", 0))
+        return_pct   = round(total_profit / data["capital"] * 100, 2)
+        profit_icon  = "💵" if total_profit >= 0 else "📉"
+
+        lines += [
+            f"📋 إجمالي الصفقات: {len(trades)}",
+            f"✅ رابحة: {len(winning)} ({win_rate}%)",
+            f"❌ خاسرة: {len(losing)}",
+            f"━━━━━━━━━━━━━━━━━━━",
+            f"💰 متوسط الربح: +${avg_win}",
+            f"📉 متوسط الخسارة: ${avg_loss}",
+            f"⚖️ Profit Factor: {pf}",
+            f"━━━━━━━━━━━━━━━━━━━",
+            f"{profit_icon} *صافي {label}: ${total_profit:+.2f} ({return_pct:+.2f}%)*",
+            f"🏆 أفضل صفقة: {best['ticker']} +${best.get('profit',0):.2f}",
+            f"💀 أسوأ صفقة: {worst['ticker']} ${worst.get('profit',0):.2f}",
+        ]
+    else:
+        lines.append(f"📋 ما في صفقات مغلقة في هذه الفترة")
+
+    # الصفقات المفتوحة
+    lines.append("\n💼 *الصفقات المفتوحة:*")
+    if data["portfolio"]:
+        open_profit = 0
+        for num, trade in data["portfolio"].items():
+            try:
+                price     = round(yf.Ticker(trade["ticker"]).fast_info.last_price, 2)
+                profit    = round((price - trade["buy_price"]) * trade["shares"], 2)
+                pct       = round((price - trade["buy_price"]) / trade["buy_price"] * 100, 2)
+                icon      = "🟢" if profit >= 0 else "🔴"
+                open_profit += profit
+                days_held = (datetime.now() - datetime.strptime(trade["date"][:10], "%Y-%m-%d")).days
+                lines.append(f"{num}⃣ {trade['ticker']} | {days_held} يوم | {icon} ${profit:+.2f} ({pct:+.2f}%)")
+            except:
+                lines.append(f"{num}⃣ {trade['ticker']} | تعذر جلب السعر")
+        open_icon = "🟢" if open_profit >= 0 else "🔴"
+        lines.append(f"{open_icon} إجمالي المفتوحة: ${open_profit:+.2f}")
+    else:
+        lines.append("ما في صفقات مفتوحة")
+
+    lines += [
+        "━━━━━━━━━━━━━━━━━━━",
+        f"💼 رأس المال الحالي: ${data['capital']:,}",
+    ]
+    send_telegram("\n".join(lines))
 
 # ══════════════════════════════════════════════
 # سجل أداء البوت
@@ -1016,20 +1130,132 @@ def get_stock_news(ticker, chat_id=None):
 # ══════════════════════════════════════════════
 # معالجة الأوامر
 # ══════════════════════════════════════════════
-def process_command(msg, chat_id):
+def understand_message_with_ai(msg, chat_id):
+    """يفهم الرسائل الطبيعية بدون أوامر محددة"""
     data = load_data()
-    msg  = msg.strip()
+
+    # بناء السياق للـ AI
+    portfolio_info = ""
+    if data["portfolio"]:
+        tickers = [t["ticker"] for t in data["portfolio"].values()]
+        portfolio_info = f"المحفظة الحالية: {', '.join(tickers)}"
+
+    signals_info = ""
+    if data["signals"]:
+        recent = list(data["signals"].values())[-5:]
+        signals_info = "آخر التوصيات: " + ", ".join([f"{s['ticker']} ({s['action']})" for s in recent])
+
+    system_prompt = f"""أنت مساعد بوت أسهم ذكي. المستخدم يتحدث معك بالعربي بشكل طبيعي.
+مهمتك: فهم قصد المستخدم وتحويله لأمر محدد.
+
+السياق الحالي:
+- رأس المال: ${data['capital']:,}
+- {portfolio_info}
+- {signals_info}
+
+الأوامر المتاحة:
+- اشتراء سهم → رد بـ: CMD:BUY:TICKER (مثال: CMD:BUY:NVDA)
+- بيع سهم → رد بـ: CMD:SELL:TICKER (مثال: CMD:SELL:AAPL)
+- بيع الكل → رد بـ: CMD:SELL:ALL
+- عرض المحفظة → رد بـ: CMD:PORTFOLIO
+- الربح الحالي → رد بـ: CMD:PROFIT
+- حالة السوق → رد بـ: CMD:MARKET
+- تحليل سهم → رد بـ: CMD:ANALYZE:TICKER
+- ملخص أسبوع → رد بـ: CMD:WEEKLY
+- ملخص شهر → رد بـ: CMD:MONTHLY
+- سؤال عام → رد بإجابة مباشرة بالعربي
+
+مهم: لو الرسالة أمر واضح رد فقط بـ CMD:... بدون أي كلام إضافي.
+لو سؤال عام أجب مباشرة بالعربي باختصار."""
+
+    try:
+        response = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key":         os.environ.get("ANTHROPIC_API_KEY", ""),
+                "anthropic-version": "2023-06-01",
+                "content-type":      "application/json",
+            },
+            json={
+                "model":      "claude-haiku-4-5-20251001",
+                "max_tokens": 100,
+                "system":     system_prompt,
+                "messages":   [{"role": "user", "content": msg}],
+            },
+            timeout=10,
+        )
+        ai_response = response.json()["content"][0]["text"].strip()
+        logger.info(f"AI فهم: {ai_response}")
+
+        # تنفيذ الأمر
+        if ai_response.startswith("CMD:"):
+            parts = ai_response.split(":")
+            cmd   = parts[1] if len(parts) > 1 else ""
+
+            if cmd == "BUY" and len(parts) > 2:
+                process_command(f"/اشتريت {parts[2]}", chat_id)
+            elif cmd == "SELL" and len(parts) > 2:
+                if parts[2] == "ALL":
+                    process_command("/بعت كل", chat_id)
+                else:
+                    process_command(f"/بعت {parts[2]}", chat_id)
+            elif cmd == "PORTFOLIO":
+                process_command("/محفظتي", chat_id)
+            elif cmd == "PROFIT":
+                process_command("/ربحي", chat_id)
+            elif cmd == "MARKET":
+                process_command("/السوق", chat_id)
+            elif cmd == "ANALYZE" and len(parts) > 2:
+                process_command(f"/حلل {parts[2]}", chat_id)
+            elif cmd == "WEEKLY":
+                process_command("/اسبوع", chat_id)
+            elif cmd == "MONTHLY":
+                process_command("/شهر", chat_id)
+            else:
+                send_telegram("❓ ما فهمت — جرب /مساعدة لقائمة الأوامر", chat_id)
+        else:
+            # إجابة مباشرة من AI
+            send_telegram(f"🤖 {ai_response}", chat_id)
+
+    except Exception as e:
+        logger.error(f"خطأ AI: {e}")
+        send_telegram("❓ ما فهمت رسالتك — جرب /مساعدة", chat_id)
+
+
+def process_command(msg, chat_id):
+    try:
+        data = load_data()
+        msg  = msg.strip()
+    except Exception as e:
+        logger.error(f"خطأ في تحميل البيانات: {e}")
+        return
 
     # /اشتريت
     if msg.startswith("/اشتريت"):
         parts = msg.split()
         if len(parts) >= 2:
-            num = ''.join(filter(str.isdigit, parts[1]))
-            if num in data["signals"]:
+            identifier = parts[1].upper()
+            signal     = None
+            num        = None
+
+            # أولاً: ابحث برقم التوصية
+            if identifier.isdigit():
+                if identifier in data["signals"]:
+                    num    = identifier
+                    signal = data["signals"][num]
+
+            # ثانياً: ابحث باسم السهم في آخر توصية
+            else:
+                for k, s in sorted(data["signals"].items(), key=lambda x: int(x[0]), reverse=True):
+                    if s["ticker"].upper() == identifier:
+                        num    = k
+                        signal = s
+                        break
+
+            if signal and num:
                 if num in data["portfolio"]:
-                    send_telegram(f"⚠️ الصفقة {num} مسجلة مسبقاً.", chat_id)
+                    send_telegram(f"⚠️ الصفقة {signal['ticker']} مسجلة مسبقاً.", chat_id)
                     return
-                signal = data["signals"][num]
                 try:
                     current_price = round(yf.Ticker(signal["ticker"]).fast_info.last_price, 2)
                 except:
@@ -1058,7 +1284,9 @@ def process_command(msg, chat_id):
                     chat_id
                 )
                 return
-        send_telegram("❌ مثال: /اشتريت 1", chat_id)
+            send_telegram("❌ ما لقيت هذا السهم في التوصيات — تأكد من الاسم أو الرقم", chat_id)
+            return
+        send_telegram("❌ مثال: /اشتريت NVDA أو /اشتريت 1", chat_id)
 
     # /بعت
     elif msg.startswith("/بعت"):
@@ -1078,15 +1306,29 @@ def process_command(msg, chat_id):
                     except Exception as e:
                         failed.append(trade["ticker"])
                 save_data(data)
-                icon = "💵" if total_profit >= 0 else "📉"
+                icon  = "💵" if total_profit >= 0 else "📉"
                 reply = f"✅ تم بيع الكل\n{icon} إجمالي: ${total_profit:+.2f}"
                 if failed:
                     reply += f"\n⚠️ تعذر بيع: {', '.join(failed)}"
                 send_telegram(reply, chat_id)
                 return
 
-            num = ''.join(filter(str.isdigit, parts[1]))
-            if num in data["portfolio"]:
+            # البحث برقم الصفقة أو باسم السهم
+            identifier = parts[1].upper()
+            num = None
+
+            # أولاً: هل هو رقم؟
+            if identifier.isdigit():
+                if identifier in data["portfolio"]:
+                    num = identifier
+            else:
+                # ثانياً: ابحث باسم السهم في المحفظة
+                for k, t in data["portfolio"].items():
+                    if t["ticker"].upper() == identifier:
+                        num = k
+                        break
+
+            if num and num in data["portfolio"]:
                 trade = data["portfolio"][num]
                 try:
                     price  = round(yf.Ticker(trade["ticker"]).fast_info.last_price, 2)
@@ -1095,7 +1337,6 @@ def process_command(msg, chat_id):
                     icon   = "💵 ربحت" if profit >= 0 else "📉 خسرت"
                     data["history"].append({**trade, "sell_price": price, "profit": profit, "date_sell": datetime.now().strftime("%Y-%m-%d")})
                     del data["portfolio"][num]
-                    # تحديث رأس المال تلقائياً
                     data["capital"] = round(data["capital"] + profit, 2)
                     save_data(data)
                     send_telegram(
@@ -1110,7 +1351,7 @@ def process_command(msg, chat_id):
                 except:
                     send_telegram("❌ تعذر جلب السعر الحالي", chat_id)
                 return
-        send_telegram("❌ مثال: /بعت 1 أو /بعت كل", chat_id)
+        send_telegram("❌ مثال: /بعت NVDA أو /بعت 1 أو /بعت كل", chat_id)
 
     # /محفظتي
     elif "/محفظتي" in msg:
@@ -1185,18 +1426,34 @@ def process_command(msg, chat_id):
     # /السوق
     elif "/السوق" in msg:
         try:
-            spy = round(yf.Ticker("SPY").fast_info.last_price, 2)
-            qqq = round(yf.Ticker("QQQ").fast_info.last_price, 2)
+            spy_info   = yf.Ticker("SPY").fast_info
+            qqq_info   = yf.Ticker("QQQ").fast_info
+            spy        = round(spy_info.last_price, 2)
+            qqq        = round(qqq_info.last_price, 2)
+            spy_chg    = round((spy_info.last_price - spy_info.previous_close) / spy_info.previous_close * 100, 2)
+            qqq_chg    = round((qqq_info.last_price - qqq_info.previous_close) / qqq_info.previous_close * 100, 2)
+            spy_icon   = "🟢" if spy_chg >= 0 else "🔴"
+            qqq_icon   = "🟢" if qqq_chg >= 0 else "🔴"
+            status     = "🟢 مفتوح" if is_market_open() else "🔴 مغلق"
             send_telegram(
                 f"📊 *السوق الآن*\n"
                 f"━━━━━━━━━━━━━━━━━━━\n"
-                f"🇺🇸 S&P 500 (SPY): ${spy}\n"
-                f"💻 Nasdaq (QQQ): ${qqq}\n"
-                f"⏰ {'🟢 مفتوح' if is_market_open() else '🔴 مغلق'}",
+                f"⏰ الحالة: {status}\n"
+                f"🇺🇸 S&P 500 (SPY): ${spy} {spy_icon} {spy_chg:+.2f}%\n"
+                f"💻 Nasdaq (QQQ): ${qqq} {qqq_icon} {qqq_chg:+.2f}%\n"
+                f"━━━━━━━━━━━━━━━━━━━\n"
+                f"⏰ يفتح 9:30 صباحاً نيويورك (4:30 مساءً السعودية)",
                 chat_id
             )
-        except:
-            send_telegram("❌ تعذر جلب بيانات السوق", chat_id)
+        except Exception as e:
+            logger.error(f"خطأ في السوق: {e}")
+            send_telegram(
+                "📊 *السوق*\n"
+                "━━━━━━━━━━━━━━━━━━━\n"
+                f"⏰ {'🟢 مفتوح' if is_market_open() else '🔴 مغلق'}\n"
+                "⚠️ تعذر جلب الأسعار — جرب مرة ثانية",
+                chat_id
+            )
 
     # /قطاعات
     elif "/قطاعات" in msg:
@@ -1265,6 +1522,22 @@ def process_command(msg, chat_id):
     elif "/أداء" in msg:
         bot_performance(chat_id)
 
+    # /شهر
+    elif "/شهر" in msg:
+        monthly_summary()
+
+    # /ربع
+    elif "/ربع" in msg:
+        quarterly_summary()
+
+    # /نصف
+    elif "/نصف" in msg:
+        semi_annual_summary()
+
+    # /سنة
+    elif "/سنة" in msg:
+        annual_summary()
+
     # /اسبوع
     elif "/اسبوع" in msg:
         weekly_summary()
@@ -1274,8 +1547,10 @@ def process_command(msg, chat_id):
         send_telegram(
             "📋 *الأوامر المتاحة:*\n"
             "━━━━━━━━━━━━━━━━━━━\n"
-            "• /اشتريت 1 — تسجيل صفقة\n"
-            "• /بعت 1 — إغلاق صفقة\n"
+            "• /اشتريت NVDA — تسجيل صفقة باسم السهم\n"
+            "• /اشتريت 1 — تسجيل صفقة برقمها\n"
+            "• /بعت NVDA — إغلاق صفقة باسم السهم\n"
+            "• /بعت 1 — إغلاق صفقة برقمها\n"
             "• /بعت كل — إغلاق الكل\n"
             "• /محفظتي — عرض محفظتك\n"
             "• /ربحي — إجمالي الربح\n"
@@ -1288,9 +1563,20 @@ def process_command(msg, chat_id):
             "• /السوق — حالة السوق\n"
             "• /capital 10000 — تعديل رأس المال\n"
             "• /risk 1 — تعديل نسبة المخاطرة\n"
-            "• /اسبوع — ملخص الأسبوع",
+            "• /اسبوع — ملخص الأسبوع\n"
+            "• /شهر — ملخص الشهر\n"
+            "• /ربع — ملخص ربع السنة\n"
+            "• /نصف — ملخص نصف السنة\n"
+            "• /سنة — ملخص السنة",
             chat_id
         )
+
+    # رسالة غير معروفة — AI يفهمها
+    else:
+        if not msg.startswith("/"):
+            understand_message_with_ai(msg, chat_id)
+        else:
+            send_telegram("❓ أمر غير معروف — أرسل /مساعدة لقائمة الأوامر", chat_id)
 
 # ══════════════════════════════════════════════
 # استقبال الأوامر
@@ -1314,7 +1600,11 @@ def check_telegram_updates():
             chat_id = str(msg.get("chat", {}).get("id", ""))
             if text and chat_id:
                 logger.info(f"أمر: {text}")
-                process_command(text, chat_id)
+                try:
+                    process_command(text, chat_id)
+                except Exception as e:
+                    logger.error(f"خطأ في process_command: {e}")
+                    send_telegram("❌ حدث خطأ — حاول مرة ثانية", chat_id)
         if changed:
             data = load_data()
             data["last_update_id"] = last_id
@@ -1371,6 +1661,10 @@ if __name__ == "__main__":
     scheduler.add_job(morning_briefing,       CronTrigger(hour=9,         minute=0,  day_of_week="mon-fri", timezone="America/New_York"))
     scheduler.add_job(end_of_day,             CronTrigger(hour=16,        minute=5,  day_of_week="mon-fri", timezone="America/New_York"))
     scheduler.add_job(weekly_summary,         CronTrigger(hour=16,        minute=30, day_of_week="fri",     timezone="America/New_York"))
+    scheduler.add_job(monthly_summary,        CronTrigger(hour=16, minute=45, day=1,                 timezone="America/New_York"))
+    scheduler.add_job(quarterly_summary,      CronTrigger(hour=16, minute=45, day=1, month="1,4,7,10", timezone="America/New_York"))
+    scheduler.add_job(semi_annual_summary,    CronTrigger(hour=16, minute=45, day=1, month="1,7",     timezone="America/New_York"))
+    scheduler.add_job(annual_summary,         CronTrigger(hour=16, minute=45, day=1, month=1,         timezone="America/New_York"))
     scheduler.add_job(check_portfolio_news,   CronTrigger(hour="10,14",   minute=0,  day_of_week="mon-fri", timezone="America/New_York"))
     scheduler.add_job(check_portfolio,        "interval", minutes=1)
     scheduler.add_job(check_telegram_updates, "interval", seconds=10, max_instances=1, coalesce=True)
