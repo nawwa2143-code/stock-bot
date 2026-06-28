@@ -1649,10 +1649,23 @@ if __name__ == "__main__":
 
     logger.info("🚀 بوت الأسهم الذكي يعمل!")
 
-    # نصفر last_update_id عشان نستقبل الرسائل الجديدة
-    _d = load_data()
-    _d["last_update_id"] = 0
-    save_data(_d)
+    # نجيب آخر update_id من تيليجرام ونبدأ منه (نتجاهل الرسائل القديمة)
+    try:
+        _r = requests.get(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates",
+            params={"offset": -1, "limit": 1},
+            timeout=8,
+        )
+        _updates = _r.json().get("result", [])
+        _d = load_data()
+        if _updates:
+            _d["last_update_id"] = _updates[-1]["update_id"]
+        else:
+            _d["last_update_id"] = 0
+        save_data(_d)
+        logger.info(f"بدأ من update_id: {_d['last_update_id']}")
+    except Exception as _e:
+        logger.error(f"خطأ في تهيئة updates: {_e}")
 
     threading.Thread(target=run_ping_server, daemon=True).start()
 
