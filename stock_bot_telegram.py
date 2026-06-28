@@ -1649,6 +1649,11 @@ if __name__ == "__main__":
 
     logger.info("🚀 بوت الأسهم الذكي يعمل!")
 
+    # نصفر last_update_id عشان نستقبل الرسائل الجديدة
+    _d = load_data()
+    _d["last_update_id"] = 0
+    save_data(_d)
+
     threading.Thread(target=run_ping_server, daemon=True).start()
 
     send_telegram(
