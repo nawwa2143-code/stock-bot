@@ -1571,10 +1571,13 @@ def process_command(msg, chat_id):
             chat_id
         )
 
-    # رسالة غير معروفة — AI يفهمها
+    # رسالة غير معروفة — AI يفهمها لو المفتاح موجود
     else:
         if not msg.startswith("/"):
-            understand_message_with_ai(msg, chat_id)
+            if os.environ.get("ANTHROPIC_API_KEY"):
+                understand_message_with_ai(msg, chat_id)
+            else:
+                send_telegram("❓ ما فهمت رسالتك — أرسل /مساعدة لقائمة الأوامر", chat_id)
         else:
             send_telegram("❓ أمر غير معروف — أرسل /مساعدة لقائمة الأوامر", chat_id)
 
