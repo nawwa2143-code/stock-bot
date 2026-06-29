@@ -1636,11 +1636,19 @@ def run_ping_server():
     server.serve_forever()
 
 def self_ping():
-    try:
-        requests.get(RENDER_URL, timeout=8)
-        logger.info("Self-ping ✅")
-    except Exception as e:
-        logger.warning(f"Self-ping فشل: {e}")
+    """يضرب الـ server كل دقيقة عشان ما ينام"""
+    urls = [
+        RENDER_URL,
+        f"{RENDER_URL}/health",
+        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getMe",
+    ]
+    for url in urls:
+        try:
+            requests.get(url, timeout=8)
+            logger.info(f"Self-ping ✅ {url[:40]}")
+            break
+        except Exception as e:
+            logger.warning(f"Self-ping فشل: {e}")
 
 # ══════════════════════════════════════════════
 # التشغيل
@@ -1692,7 +1700,7 @@ if __name__ == "__main__":
     scheduler.add_job(check_portfolio_news,   CronTrigger(hour="10,14",   minute=0,  day_of_week="mon-fri", timezone="America/New_York"))
     scheduler.add_job(check_portfolio,        "interval", minutes=1)
     scheduler.add_job(check_telegram_updates, "interval", seconds=10, max_instances=1, coalesce=True)
-    scheduler.add_job(self_ping,              "interval", minutes=5)
+    scheduler.add_job(self_ping,              "interval", minutes=1)
 
     try:
         scheduler.start()
