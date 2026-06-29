@@ -730,6 +730,9 @@ def morning_briefing():
     )
 
     for signal in all_signals:
+        # لا نرسل SELL في الصباح — المستخدم ما يملك السهم بعد
+        if signal["action_en"] == "SELL":
+            continue
         data["signal_counter"] += 1
         num = data["signal_counter"]
         data["signals"][str(num)] = {
